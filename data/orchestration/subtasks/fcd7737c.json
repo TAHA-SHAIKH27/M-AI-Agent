@@ -1,0 +1,19 @@
+{
+  "07ba895a-1": {
+    "subtask_id": "07ba895a-1",
+    "task_id": "fcd7737c",
+    "status": "failed",
+    "assigned_target_type": "tool",
+    "assigned_target_id": "web_search",
+    "started_at": 1794125964251,
+    "completed_at": 1794125964260,
+    "result": null,
+    "error": "[ToolValidationError] Invalid input for tool web_search: 'query' is a required property",
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 7.080316543579102,
+    "metadata": {}
+  }
+}

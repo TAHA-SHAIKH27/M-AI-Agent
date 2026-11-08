@@ -1,0 +1,19 @@
+{
+  "f46423f7-1": {
+    "subtask_id": "f46423f7-1",
+    "task_id": "693a5693",
+    "status": "failed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794125811671,
+    "completed_at": 1794125817264,
+    "result": null,
+    "error": "[ProviderError] All providers failed. Last error: [ProviderError] LM Studio HTTP error: All connection attempts failed",
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 5592.629671096802,
+    "metadata": {}
+  }
+}

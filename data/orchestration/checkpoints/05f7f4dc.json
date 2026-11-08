@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "05f7f4dc",
+  "task_id": "73755707",
+  "checkpoint_type": "post_execution",
+  "created_at": 1794076598088,
+  "execution_state": {
+    "status": "running",
+    "started_at": 1794076594571
+  },
+  "subtask_states": {
+    "59984348-1": {
+      "status": "completed",
+      "result": {
+        "content": "I'm here and ready to help. What would you like me to do?",
+        "tool_calls": []
+      },
+      "error": null,
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [
+    "59984348-1"
+  ],
+  "failed_subtasks": [],
+  "metadata": {}
+}

@@ -1,0 +1,19 @@
+{
+  "947ca09a-1": {
+    "subtask_id": "947ca09a-1",
+    "task_id": "cab18029",
+    "status": "failed",
+    "assigned_target_type": "tool",
+    "assigned_target_id": "web_search",
+    "started_at": 1794068910997,
+    "completed_at": 1794068911011,
+    "result": null,
+    "error": "[ToolValidationError] Invalid input for tool web_search: 'query' is a required property",
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 11.1541748046875,
+    "metadata": {}
+  }
+}

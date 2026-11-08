@@ -1,0 +1,28 @@
+{
+  "checkpoint_id": "72ecd0fe",
+  "task_id": "d9a41ba1",
+  "checkpoint_type": "post_execution",
+  "created_at": 1794125078854,
+  "execution_state": {
+    "status": "running",
+    "started_at": 1794125078721
+  },
+  "subtask_states": {
+    "capture_screenshot": {
+      "status": "completed",
+      "result": {
+        "image_path": "C:\\Users\\taha\\AppData\\Local\\Temp\\tmpn9vwqybf.png",
+        "width": 1920,
+        "height": 1080,
+        "format": "png"
+      },
+      "error": null,
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [
+    "capture_screenshot"
+  ],
+  "failed_subtasks": [],
+  "metadata": {}
+}

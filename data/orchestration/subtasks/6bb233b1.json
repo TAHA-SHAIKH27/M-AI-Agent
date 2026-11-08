@@ -1,0 +1,19 @@
+{
+  "336d31c7-1": {
+    "subtask_id": "336d31c7-1",
+    "task_id": "6bb233b1",
+    "status": "pending",
+    "assigned_target_type": null,
+    "assigned_target_id": null,
+    "started_at": null,
+    "completed_at": null,
+    "result": null,
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 0.0,
+    "metadata": {}
+  }
+}

@@ -1,0 +1,95 @@
+"""Built-in tools for M AI Assistant."""
+from .system_info import SystemInfoTool
+from .file_ops import FileReadTool, FileListTool, FileSearchTool, FileWriteTool, FileDeleteTool
+from .memory_ops import MemoryReadTool, MemorySearchTool
+from .web_search import WebSearchTool
+from .windows_automation import (
+    AppLaunchTool,
+    AppControlTool,
+    PowerShellTool,
+    ProcessListTool,
+    WindowListTool,
+    WindowsShortcutTool,
+    SystemCommandTool,
+    WINDOWS_TOOLS,
+)
+from .voice import (
+    VoiceRecordTool,
+    VoiceTranscribeTool,
+    VoiceSpeakTool,
+    WakeWordListenTool,
+    VOICE_TOOLS,
+    voice_manager,
+)
+from .visual_automation import (
+    ScreenCaptureTool,
+    ScreenOCRTool,
+    VisualFindTool,
+    MouseControlTool,
+    KeyboardInputTool,
+    WindowInteractTool,
+    VisualVerifyTool,
+    VISUAL_TOOLS,
+)
+
+# Tool classes for registration
+BUILTIN_TOOLS = [
+    "SystemInfoTool",
+    "FileReadTool",
+    "FileListTool",
+    "FileSearchTool",
+    "FileWriteTool",
+    "FileDeleteTool",
+    "MemoryReadTool",
+    "MemorySearchTool",
+    "WebSearchTool",
+    "AppLaunchTool",
+    "AppControlTool",
+    "PowerShellTool",
+    "ProcessListTool",
+    "WindowListTool",
+    "WindowsShortcutTool",
+    "SystemCommandTool",
+    "VoiceRecordTool",
+    "VoiceTranscribeTool",
+    "VoiceSpeakTool",
+    "WakeWordListenTool",
+    "ScreenCaptureTool",
+    "ScreenOCRTool",
+    "VisualFindTool",
+    "MouseControlTool",
+    "KeyboardInputTool",
+    "WindowInteractTool",
+    "VisualVerifyTool",
+]
+
+__all__ = [
+    "SystemInfoTool",
+    "FileReadTool",
+    "FileListTool",
+    "FileSearchTool",
+    "FileWriteTool",
+    "FileDeleteTool",
+    "MemoryReadTool",
+    "MemorySearchTool",
+    "WebSearchTool",
+    "AppLaunchTool",
+    "AppControlTool",
+    "PowerShellTool",
+    "ProcessListTool",
+    "WindowListTool",
+    "WindowsShortcutTool",
+    "SystemCommandTool",
+    "VoiceRecordTool",
+    "VoiceTranscribeTool",
+    "VoiceSpeakTool",
+    "WakeWordListenTool",
+    "ScreenCaptureTool",
+    "ScreenOCRTool",
+    "VisualFindTool",
+    "MouseControlTool",
+    "KeyboardInputTool",
+    "WindowInteractTool",
+    "VisualVerifyTool",
+    "BUILTIN_TOOLS",
+]

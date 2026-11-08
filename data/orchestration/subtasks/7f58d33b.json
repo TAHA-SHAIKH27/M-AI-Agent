@@ -1,0 +1,22 @@
+{
+  "aece1d15-1": {
+    "subtask_id": "aece1d15-1",
+    "task_id": "7f58d33b",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794068886913,
+    "completed_at": 1794068886925,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 9.63139533996582,
+    "metadata": {}
+  }
+}

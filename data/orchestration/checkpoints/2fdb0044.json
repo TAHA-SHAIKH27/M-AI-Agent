@@ -1,0 +1,23 @@
+{
+  "checkpoint_id": "2fdb0044",
+  "task_id": "5d76cd88",
+  "checkpoint_type": "post_execution",
+  "created_at": 1794075601535,
+  "execution_state": {
+    "status": "failed",
+    "started_at": 1794075593068
+  },
+  "subtask_states": {
+    "65a6682f-1": {
+      "status": "failed",
+      "result": null,
+      "error": "[ProviderError] All providers failed. Last error: [ProviderError] LM Studio HTTP error: All connection attempts failed",
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [],
+  "failed_subtasks": [
+    "65a6682f-1"
+  ],
+  "metadata": {}
+}

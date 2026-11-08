@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "5f2cda82",
+  "task_id": "f51d50de",
+  "checkpoint_type": "post_execution",
+  "created_at": 1794123619644,
+  "execution_state": {
+    "status": "completed",
+    "started_at": 1794123619620
+  },
+  "subtask_states": {
+    "7644a836-1": {
+      "status": "completed",
+      "result": {
+        "content": "Hello! 2 + 2 = 4",
+        "tool_calls": []
+      },
+      "error": null,
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [
+    "7644a836-1"
+  ],
+  "failed_subtasks": [],
+  "metadata": {}
+}

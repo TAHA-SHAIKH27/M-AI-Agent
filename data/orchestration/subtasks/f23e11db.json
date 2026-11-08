@@ -1,0 +1,24 @@
+{
+  "capture_screenshot": {
+    "subtask_id": "capture_screenshot",
+    "task_id": "f23e11db",
+    "status": "completed",
+    "assigned_target_type": "tool",
+    "assigned_target_id": "screen_capture",
+    "started_at": 1794124378437,
+    "completed_at": 1794124378805,
+    "result": {
+      "image_path": "C:\\Users\\taha\\AppData\\Local\\Temp\\tmp4f1_6ytn.png",
+      "width": 1920,
+      "height": 1080,
+      "format": "png"
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 366.4510250091553,
+    "metadata": {}
+  }
+}

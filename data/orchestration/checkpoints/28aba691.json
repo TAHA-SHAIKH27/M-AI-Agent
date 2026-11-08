@@ -1,0 +1,23 @@
+{
+  "checkpoint_id": "28aba691",
+  "task_id": "e638e46a",
+  "checkpoint_type": "post_execution",
+  "created_at": 1794063859751,
+  "execution_state": {
+    "status": "failed",
+    "started_at": 1794063859726
+  },
+  "subtask_states": {
+    "d1542691-1": {
+      "status": "failed",
+      "result": null,
+      "error": "[ToolValidationError] Invalid input for tool web_search: 'query' is a required property",
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [],
+  "failed_subtasks": [
+    "d1542691-1"
+  ],
+  "metadata": {}
+}

@@ -1,0 +1,154 @@
+{
+  "file:read": {
+    "capability": "file:read",
+    "granted": true,
+    "granted_at": "2026-11-08T13:49:38.659874",
+    "expires_at": null,
+    "scope": "global",
+    "metadata": {}
+  },
+  "file:list": {
+    "capability": "file:list",
+    "granted": true,
+    "granted_at": "2026-11-08T13:49:38.661830",
+    "expires_at": null,
+    "scope": "global",
+    "metadata": {}
+  },
+  "file:search": {
+    "capability": "file:search",
+    "granted": true,
+    "granted_at": "2026-11-08T13:49:38.663835",
+    "expires_at": null,
+    "scope": "global",
+    "metadata": {}
+  },
+  "web:search": {
+    "capability": "web:search",
+    "granted": true,
+    "granted_at": "2026-11-08T13:49:38.665439",
+    "expires_at": null,
+    "scope": "global",
+    "metadata": {}
+  },
+  "system:info": {
+    "capability": "system:info",
+    "granted": true,
+    "granted_at": "2026-11-08T13:49:38.667420",
+    "expires_at": null,
+    "scope": "global",
+    "metadata": {}
+  },
+  "model:chat": {
+    "capability": "model:chat",
+    "granted": true,
+    "granted_at": "2026-11-08T13:49:41.102750",
+    "expires_at": null,
+    "scope": "global",
+    "metadata": {}
+  },
+  "app:control": {
+    "capability": "app:control",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:14.966824",
+    "expires_at": "2026-11-08T14:48:14.966816",
+    "scope": "global",
+    "metadata": {}
+  },
+  "app:launch": {
+    "capability": "app:launch",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:15.037100",
+    "expires_at": "2026-11-08T14:48:15.037089",
+    "scope": "global",
+    "metadata": {}
+  },
+  "system:admin": {
+    "capability": "system:admin",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:14.967306",
+    "expires_at": "2026-11-08T14:48:14.967298",
+    "scope": "global",
+    "metadata": {}
+  },
+  "file:write": {
+    "capability": "file:write",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:10.797014",
+    "expires_at": "2026-11-08T14:48:10.796999",
+    "scope": "global",
+    "metadata": {}
+  },
+  "voice:tts": {
+    "capability": "voice:tts",
+    "granted": true,
+    "granted_at": "2026-11-08T00:50:15.424688",
+    "expires_at": "2026-11-08T01:50:15.424648",
+    "scope": "global",
+    "metadata": {}
+  },
+  "voice:stt": {
+    "capability": "voice:stt",
+    "granted": true,
+    "granted_at": "2026-11-08T00:50:15.427905",
+    "expires_at": "2026-11-08T01:50:15.427869",
+    "scope": "global",
+    "metadata": {}
+  },
+  "voice:mic": {
+    "capability": "voice:mic",
+    "granted": true,
+    "granted_at": "2026-11-08T00:50:15.430646",
+    "expires_at": "2026-11-08T01:50:15.430602",
+    "scope": "global",
+    "metadata": {}
+  },
+  "screen:capture": {
+    "capability": "screen:capture",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:14.662264",
+    "expires_at": "2026-11-08T14:48:14.662257",
+    "scope": "global",
+    "metadata": {}
+  },
+  "screen:ocr": {
+    "capability": "screen:ocr",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:14.662735",
+    "expires_at": "2026-11-08T14:48:14.662729",
+    "scope": "global",
+    "metadata": {}
+  },
+  "screen:find": {
+    "capability": "screen:find",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:10.809761",
+    "expires_at": "2026-11-08T14:48:10.809752",
+    "scope": "global",
+    "metadata": {}
+  },
+  "automation:input": {
+    "capability": "automation:input",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:14.663622",
+    "expires_at": "2026-11-08T14:48:14.663616",
+    "scope": "global",
+    "metadata": {}
+  },
+  "automation:window": {
+    "capability": "automation:window",
+    "granted": true,
+    "granted_at": "2026-11-08T00:50:15.445796",
+    "expires_at": "2026-11-08T01:50:15.445739",
+    "scope": "global",
+    "metadata": {}
+  },
+  "screen:verify": {
+    "capability": "screen:verify",
+    "granted": true,
+    "granted_at": "2026-11-08T13:48:14.663186",
+    "expires_at": "2026-11-08T14:48:14.663180",
+    "scope": "global",
+    "metadata": {}
+  }
+}

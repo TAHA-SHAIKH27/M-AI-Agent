@@ -1,0 +1,136 @@
+[project]
+name = "m-core"
+version = "0.1.0-dev"
+description = "M AI Assistant - Core Backend System"
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "M AI Team", email = "dev@m-ai.local"}
+]
+keywords = ["ai", "assistant", "llm", "agents", "voice", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # Core
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.4.0",
+    "pyyaml>=6.0.1",
+    "python-dotenv>=1.0.1",
+    "msgspec>=0.18.6",
+    "structlog>=24.1.0",
+    "tenacity>=8.2.3",
+    "anyio>=4.4.0",
+    "httpx>=0.27.0",
+    "typer>=0.12.4",
+    "rich>=13.7.1",
+    "keyring>=25.4.1",
+    "cryptography>=42.0.8",
+    "sqlite-utils>=3.37.0",
+    
+    # AI/ML - Core
+    "langgraph>=1.2.0",
+    "langchain-core>=0.3.0",
+    "chromadb==1.0.8",
+    "sentence-transformers>=6.2.0",
+    
+    # API
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    
+    # Testing
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "pre-commit>=3.7.0",
+    "ipython>=8.25.0",
+]
+voice = [
+    "faster-whisper>=1.2.0",
+    "kokoro>=0.1.0",
+    "pvporcupine>=3.0.0",
+    "sounddevice>=0.4.7",
+    "silero-vad>=5.0.0",
+]
+windows = [
+    "uiautomation>=2.0.0",
+    "comtypes>=1.2.0",
+    "pywinauto>=0.6.8",
+]
+web = [
+    "playwright>=1.45.0",
+    # "browser-use>=0.1.40",  # Temporarily disabled due to vision dependency issue
+    # "stagehand>=0.1.0",
+]
+phone = [
+    "twilio>=9.8.0",
+    "aiohttp>=3.9.0",
+]
+# vision = [
+#     "transformers>=4.44.0",
+#     "torch>=2.4.0",
+#     "Pillow>=10.0.0",
+#     # "opencv-python-headless>=4.10.0",  # Temporarily disabled for Python 3.14 compat
+# ]
+scheduler = [
+    "apscheduler>=3.11.0",
+]
+# all = ["voice", "windows", "web", "phone", "vision", "scheduler"]
+
+[tool.uv.sources]
+# Local development overrides if needed
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning:fastapi.routing",
+    "ignore::DeprecationWarning:starlette._utils",
+    "ignore::DeprecationWarning:chromadb.telemetry",
+    "ignore::DeprecationWarning:asyncio.iscoroutinefunction",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "DTZ", "T10", "T20", "PYI"]
+ignore = ["E501", "TRY003"]
+fixable = ["ALL"]
+unfixable = ["T10", "T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+strict = true
+ignore_missing_imports = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

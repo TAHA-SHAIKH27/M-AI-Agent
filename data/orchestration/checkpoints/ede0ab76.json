@@ -1,0 +1,21 @@
+{
+  "checkpoint_id": "ede0ab76",
+  "task_id": "29ef6c5f",
+  "checkpoint_type": "pre_execution",
+  "created_at": 1794061287506,
+  "execution_state": {
+    "status": "queued",
+    "started_at": null
+  },
+  "subtask_states": {
+    "27d7cfc6-1": {
+      "status": "pending",
+      "result": null,
+      "error": null,
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [],
+  "failed_subtasks": [],
+  "metadata": {}
+}

@@ -1,0 +1,21 @@
+{
+  "checkpoint_id": "66822d50",
+  "task_id": "cab18029",
+  "checkpoint_type": "pre_execution",
+  "created_at": 1794068910993,
+  "execution_state": {
+    "status": "queued",
+    "started_at": null
+  },
+  "subtask_states": {
+    "947ca09a-1": {
+      "status": "pending",
+      "result": null,
+      "error": null,
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [],
+  "failed_subtasks": [],
+  "metadata": {}
+}

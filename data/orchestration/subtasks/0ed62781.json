@@ -1,0 +1,22 @@
+{
+  "5562935e-1": {
+    "subtask_id": "5562935e-1",
+    "task_id": "0ed62781",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794061541499,
+    "completed_at": 1794061544308,
+    "result": {
+      "content": "I'm ready to help! What would you like me to respond to? You said \"test\" but didn't ask a specific question. Feel free to ask me anything!",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 2807.9609870910645,
+    "metadata": {}
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "5cbb2ad5-1": {
+    "subtask_id": "5cbb2ad5-1",
+    "task_id": "587c67e0",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794063878691,
+    "completed_at": 1794063881415,
+    "result": {
+      "content": "I'm here to help! What would you like me to do?",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 2723.6411571502686,
+    "metadata": {}
+  }
+}

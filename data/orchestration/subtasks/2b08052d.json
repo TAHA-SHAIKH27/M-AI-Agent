@@ -1,0 +1,22 @@
+{
+  "8d0efe6c-1": {
+    "subtask_id": "8d0efe6c-1",
+    "task_id": "2b08052d",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794059142748,
+    "completed_at": 1794059142762,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 11.581897735595703,
+    "metadata": {}
+  }
+}

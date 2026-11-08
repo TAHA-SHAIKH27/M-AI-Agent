@@ -1,0 +1,19 @@
+{
+  "beca29c2-1": {
+    "subtask_id": "beca29c2-1",
+    "task_id": "8d5e0af6",
+    "status": "failed",
+    "assigned_target_type": "tool",
+    "assigned_target_id": "web_search",
+    "started_at": 1794076569260,
+    "completed_at": 1794076569272,
+    "result": null,
+    "error": "[ToolValidationError] Invalid input for tool web_search: 'query' is a required property",
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 10.078668594360352,
+    "metadata": {}
+  }
+}

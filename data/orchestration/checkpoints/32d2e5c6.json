@@ -1,0 +1,33 @@
+{
+  "checkpoint_id": "32d2e5c6",
+  "task_id": "a93b6c61",
+  "checkpoint_type": "pre_execution",
+  "created_at": 1794124647549,
+  "execution_state": {
+    "status": "queued",
+    "started_at": null
+  },
+  "subtask_states": {
+    "547c805c-1": {
+      "status": "pending",
+      "result": null,
+      "error": null,
+      "retry_count": 0
+    },
+    "547c805c-2": {
+      "status": "pending",
+      "result": null,
+      "error": null,
+      "retry_count": 0
+    },
+    "547c805c-synthesis": {
+      "status": "pending",
+      "result": null,
+      "error": null,
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [],
+  "failed_subtasks": [],
+  "metadata": {}
+}

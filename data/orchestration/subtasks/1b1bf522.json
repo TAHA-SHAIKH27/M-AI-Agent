@@ -1,0 +1,22 @@
+{
+  "50415e70-1": {
+    "subtask_id": "50415e70-1",
+    "task_id": "1b1bf522",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794078770155,
+    "completed_at": 1794078770167,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 9.68480110168457,
+    "metadata": {}
+  }
+}

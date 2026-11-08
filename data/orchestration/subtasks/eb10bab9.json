@@ -1,0 +1,19 @@
+{
+  "cb48a911-1": {
+    "subtask_id": "cb48a911-1",
+    "task_id": "eb10bab9",
+    "status": "failed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794125524824,
+    "completed_at": 1794125529929,
+    "result": null,
+    "error": "[ProviderError] All providers failed. Last error: [ProviderError] LM Studio HTTP error: All connection attempts failed",
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 5105.661392211914,
+    "metadata": {}
+  }
+}

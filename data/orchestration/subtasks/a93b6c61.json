@@ -1,0 +1,56 @@
+{
+  "547c805c-1": {
+    "subtask_id": "547c805c-1",
+    "task_id": "a93b6c61",
+    "status": "failed",
+    "assigned_target_type": "tool",
+    "assigned_target_id": "app_launch",
+    "started_at": 1794124647552,
+    "completed_at": 1794124647561,
+    "result": null,
+    "error": "[ToolValidationError] Invalid input for tool app_launch: 'app_name' is a required property",
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 9.310007095336914,
+    "metadata": {}
+  },
+  "547c805c-2": {
+    "subtask_id": "547c805c-2",
+    "task_id": "a93b6c61",
+    "status": "failed",
+    "assigned_target_type": "tool",
+    "assigned_target_id": "window_interact",
+    "started_at": 1794124647563,
+    "completed_at": 1794124647564,
+    "result": null,
+    "error": "[ConsentRequiredError] Consent required for capability: automation:window",
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 1.7490386962890625,
+    "metadata": {}
+  },
+  "547c805c-synthesis": {
+    "subtask_id": "547c805c-synthesis",
+    "task_id": "a93b6c61",
+    "status": "pending",
+    "assigned_target_type": null,
+    "assigned_target_id": null,
+    "started_at": null,
+    "completed_at": null,
+    "result": null,
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [
+      "547c805c-1",
+      "547c805c-2"
+    ],
+    "execution_time_ms": 0.0,
+    "metadata": {}
+  }
+}

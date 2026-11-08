@@ -1,0 +1,22 @@
+{
+  "77fb7852-1": {
+    "subtask_id": "77fb7852-1",
+    "task_id": "daa08274",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794076569386,
+    "completed_at": 1794076569396,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 7.72857666015625,
+    "metadata": {}
+  }
+}

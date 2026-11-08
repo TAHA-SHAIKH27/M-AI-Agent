@@ -1,0 +1,26 @@
+{
+  "checkpoint_id": "46749655",
+  "task_id": "c99d4d91",
+  "checkpoint_type": "post_execution",
+  "created_at": 1794059929750,
+  "execution_state": {
+    "status": "running",
+    "started_at": 1794059926908
+  },
+  "subtask_states": {
+    "13ab63c3-1": {
+      "status": "completed",
+      "result": {
+        "content": "Test received! How can I help you today?",
+        "tool_calls": []
+      },
+      "error": null,
+      "retry_count": 0
+    }
+  },
+  "completed_subtasks": [
+    "13ab63c3-1"
+  ],
+  "failed_subtasks": [],
+  "metadata": {}
+}

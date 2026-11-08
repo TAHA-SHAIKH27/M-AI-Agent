@@ -1,0 +1,22 @@
+{
+  "94a809aa-1": {
+    "subtask_id": "94a809aa-1",
+    "task_id": "1c257ddd",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794061268737,
+    "completed_at": 1794061268742,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 4.240751266479492,
+    "metadata": {}
+  }
+}

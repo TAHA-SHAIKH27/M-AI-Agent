@@ -1,0 +1,22 @@
+{
+  "464511af-1": {
+    "subtask_id": "464511af-1",
+    "task_id": "fe14884a",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794067355781,
+    "completed_at": 1794067355786,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 4.548788070678711,
+    "metadata": {}
+  }
+}

@@ -1,0 +1,13 @@
+<resources>
+    <!-- Base application theme. Use a simple AppCompat theme for the initial window -->
+    <style name="Theme.MAndroidCompanion" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <!-- Status bar color. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <!-- Disable default action bar -->
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+</resources>

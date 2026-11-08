@@ -1,0 +1,22 @@
+{
+  "5303a737-1": {
+    "subtask_id": "5303a737-1",
+    "task_id": "9fc0a2f8",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794068117580,
+    "completed_at": 1794068117591,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 8.809804916381836,
+    "metadata": {}
+  }
+}

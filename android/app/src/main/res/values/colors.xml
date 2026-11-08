@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Primary Colors -->
+    <color name="primary">#6366F1</color>
+    <color name="primary_variant">#4F46E5</color>
+    <color name="on_primary">#FFFFFF</color>
+
+    <!-- Secondary Colors -->
+    <color name="secondary">#06B6D4</color>
+    <color name="secondary_variant">#0891B2</color>
+    <color name="on_secondary">#FFFFFF</color>
+
+    <!-- Surface Colors -->
+    <color name="surface">#1E1E2E</color>
+    <color name="surface_variant">#28283E</color>
+    <color name="on_surface">#F8F8F8</color>
+
+    <!-- Background Colors -->
+    <color name="background">#181825</color>
+    <color name="on_background">#F8F8F8</color>
+
+    <!-- Error Colors -->
+    <color name="error">#F87171</color>
+    <color name="on_error">#FFFFFF</color>
+
+    <!-- Tertiary Colors -->
+    <color name="tertiary">#4ADE80</color>
+    <color name="tertiary_variant">#22C55E</color>
+    <color name="on_tertiary">#FFFFFF</color>
+
+    <!-- Success Colors -->
+    <color name="success">#4ADE80</color>
+    <color name="on_success">#FFFFFF</color>
+
+    <!-- Warning Colors -->
+    <color name="warning">#FBBF24</color>
+    <color name="on_warning">#181825</color>
+
+    <!-- Chat Colors -->
+    <color name="user_message_bg">#6366F1</color>
+    <color name="assistant_message_bg">#28283E</color>
+    <color name="system_message_bg">#0891B2</color>
+
+    <!-- Voice Colors -->
+    <color name="voice_active">#F87171</color>
+    <color name="voice_inactive">#6366F1</color>
+    <color name="voice_processing">#FBBF24</color>
+
+    <!-- Divider -->
+    <color name="divider">#3D3D5C</color>
+
+    <!-- Transparent -->
+    <color name="transparent">#00000000</color>
+</resources>

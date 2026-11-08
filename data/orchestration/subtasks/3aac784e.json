@@ -1,0 +1,22 @@
+{
+  "f7e48a04-1": {
+    "subtask_id": "f7e48a04-1",
+    "task_id": "3aac784e",
+    "status": "completed",
+    "assigned_target_type": "agent",
+    "assigned_target_id": "general_assistant",
+    "started_at": 1794125208031,
+    "completed_at": 1794125208040,
+    "result": {
+      "content": "Hello! 2 + 2 = 4",
+      "tool_calls": []
+    },
+    "error": null,
+    "error_code": null,
+    "retry_count": 0,
+    "max_retries": 2,
+    "dependencies": [],
+    "execution_time_ms": 7.593393325805664,
+    "metadata": {}
+  }
+}
