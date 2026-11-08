@@ -65,6 +65,7 @@ data/temp/
 *.onnx
 *.pt
 *.pth
+*.hprof
 
 # Test outputs
 .pytest_cache/
