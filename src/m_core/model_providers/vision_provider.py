@@ -57,6 +57,7 @@ class VisionModelProvider(ModelProvider):
         self._initialized = False
         self._device = None
         self._model_type = "unknown"  # "omniparser" or "captioning"
+        self._health_cache: Optional[ProviderHealth] = None
     
     @property
     def provider_id(self) -> str:
@@ -181,6 +182,19 @@ class VisionModelProvider(ModelProvider):
                 error=str(e),
                 model_count=0,
             )
+    
+    async def list_models(self) -> List[ModelInfo]:
+        """List available models."""
+        if not self._initialized:
+            return []
+        
+        return [ModelInfo(
+            id=self.config.model_id,
+            name=f"Vision GUI Detection ({self._model_type})",
+            description="GUI element detection model for desktop automation",
+            capabilities={"vision": True, "gui_detection": True},
+            max_context_length=4096,
+        )]
     
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         """Not supported - vision provider is for GUI analysis only."""

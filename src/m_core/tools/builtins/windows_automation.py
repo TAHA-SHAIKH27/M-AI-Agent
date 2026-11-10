@@ -107,10 +107,10 @@ class AppLaunchTool(BaseTool):
     }
     
     def _get_app_path(self, app_name: str) -> str:
-        """Resolve app name to executable path."""
-        # Common Windows apps
+        """Resolve app name to executable path or launch command."""
+        # Common Windows apps - UWP apps need special handling
         common_apps = {
-            "notepad": "notepad.exe",
+            "notepad": "uwp:Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
             "calc": "calc.exe",
             "calculator": "calc.exe",
             "explorer": "explorer.exe",
@@ -151,6 +151,50 @@ class AppLaunchTool(BaseTool):
         # Try to find in PATH
         return app_name + ".exe"
     
+    def _is_uwp_app(self, app_path: str) -> bool:
+        """Check if the app path is a UWP app identifier."""
+        return app_path.startswith("uwp:")
+    
+    def _launch_uwp_app(self, app_path: str) -> subprocess.Popen:
+        """Launch a UWP app using the AppsFolder protocol and wait for the actual process."""
+        # app_path comes as "uwp:Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+        # We need to strip the "uwp:" prefix
+        if app_path.startswith("uwp:"):
+            app_id = app_path[4:]
+        else:
+            app_id = app_path
+        
+        # Use cmd.exe to launch UWP app via AppsFolder protocol (more reliable than explorer.exe or powershell)
+        # Format: cmd.exe /c start "" shell:AppsFolder\<AppUserModelId>
+        cmd = ["cmd.exe", "/c", "start", "", f"shell:AppsFolder\\{app_id}"]
+        
+        # Launch cmd which will start the UWP app
+        proc = subprocess.Popen(cmd)
+        
+        # Wait for the actual UWP app process to start
+        import time
+        import psutil
+        
+        # For Notepad, the UWP process name is "Notepad.exe"
+        target_name = "Notepad.exe"
+        
+        # Wait for the process to appear (up to 10 seconds)
+        for _ in range(20):
+            time.sleep(0.5)
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    if proc.info['name'] == target_name:
+                        # Found the UWP process, return a mock process object with the correct PID
+                        class MockProcess:
+                            def __init__(self, pid):
+                                self.pid = pid
+                        return MockProcess(proc.info['pid'])
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        
+        # If we couldn't find the process, return the cmd process (fallback)
+        return proc
+    
     async def _execute_impl(self, context) -> dict:
         args = context.arguments
         app_name = args.get("app_name")
@@ -168,7 +212,22 @@ class AppLaunchTool(BaseTool):
         app_path = self._get_app_path(app_name)
         
         try:
-            # Prepare command
+            # Handle UWP apps (like Notepad on Windows 11)
+            if self._is_uwp_app(app_path):
+                proc = self._launch_uwp_app(app_path)
+                # For UWP apps launched via explorer, the PID might not be immediately available
+                # We return success and let the caller wait for the window
+                return {
+                    "success": True,
+                    "result": {
+                        "process_id": proc.pid if proc.pid > 0 else 0,
+                        "process_name": app_path,
+                        "started": True,
+                    },
+                    "error": None,
+                }
+            
+            # Prepare command for regular apps
             cmd = [app_path]
             if arguments:
                 if isinstance(arguments, str):

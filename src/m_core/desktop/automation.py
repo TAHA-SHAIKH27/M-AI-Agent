@@ -392,7 +392,7 @@ class DesktopAutomation:
         """
         cid = self._get_correlation_id("focus")
         
-        # Determine identifier type
+        # Determine identifier type - prefer HWND for reliability
         if isinstance(identifier, int):
             if is_hwnd:
                 arguments = {"action": "focus", "hwnd": identifier}
@@ -401,12 +401,16 @@ class DesktopAutomation:
         elif identifier.endswith(".exe"):
             arguments = {"action": "focus", "process_name": identifier}
         else:
-            # Assume it's a window title
+            # Assume it's a window title - but this is fragile, prefer HWND/PID
             arguments = {"action": "focus", "window_title": identifier}
         
         result = await self._execute_tool("app_control", arguments, ["app:control"], cid)
         
         if not result["success"]:
+            # If focus failed with title, try to find by PID if we have one
+            if not isinstance(identifier, int) and not identifier.endswith(".exe"):
+                # Try to find the window by PID from our tracked windows
+                pass  # Could implement PID tracking here
             return InteractionResult(
                 success=False, method_used=InteractionMethod.MOUSE_KEYBOARD,
                 error=result.get("error", "Focus failed")
@@ -478,23 +482,18 @@ class DesktopAutomation:
         for attempt in range(10):
             await asyncio.sleep(0.5)  # Wait for dialog
             
-            # First try window_list tool
-            result = await self._execute_tool("window_list", {"filter_title": "Save as"}, ["app:control"])
+            # First try window_list tool - case-insensitive match
+            result = await self._execute_tool("window_list", {"filter_title": "Save"}, ["app:control"])
             if result["success"] and result["result"]["windows"]:
-                save_dialog = result["result"]["windows"][0]
-                dialog_title = save_dialog["title"]
-                dialog_hwnd = save_dialog["hwnd"]
-                print(f'   Found Save As dialog via window_list: "{dialog_title}" (attempt {attempt+1})')
-                break
-            
-            # Try alternative title
-            result = await self._execute_tool("window_list", {"filter_title": "Save As"}, ["app:control"])
-            if result["success"] and result["result"]["windows"]:
-                save_dialog = result["result"]["windows"][0]
-                dialog_title = save_dialog["title"]
-                dialog_hwnd = save_dialog["hwnd"]
-                print(f'   Found Save As dialog via window_list (Save As): "{dialog_title}" (attempt {attempt+1})')
-                break
+                for w in result["result"]["windows"]:
+                    if "save" in w["title"].lower():
+                        save_dialog = w
+                        dialog_title = w["title"]
+                        dialog_hwnd = w["hwnd"]
+                        print(f'   Found Save As dialog via window_list: "{dialog_title}" (attempt {attempt+1})')
+                        break
+                if save_dialog:
+                    break
             
             # Fallback: use win32gui directly
             def enum_windows(hwnd, results):
@@ -553,30 +552,35 @@ class DesktopAutomation:
         confirm_dialog = None
         for attempt in range(5):
             await asyncio.sleep(0.5)
-            result = await self._execute_tool("window_list", {"filter_title": "Confirm Save As"}, ["app:control"])
+            result = await self._execute_tool("window_list", {"filter_title": "Confirm"}, ["app:control"])
             if result["success"] and result["result"]["windows"]:
-                confirm_dialog = result["result"]["windows"][0]
-                confirm_title = confirm_dialog["title"]
-                print(f'   Found Confirm Save As dialog: "{confirm_title}"')
-                
-                # Use UI Automation to find and click the "Yes" button
-                yes_button = {"type": "Button", "title": "Yes", "index": 0}
-                result = await self._execute_tool("window_interact", {
-                    "action": "click", "window_title": confirm_title, 
-                    "control_identifier": yes_button
-                }, ["automation:window"])
-                if result["success"]:
-                    print(f'   Clicked "Yes" button via UI Automation')
-                else:
-                    # Fallback: try Tab to navigate to Yes, then Enter
-                    print(f'   UI Automation failed, trying Tab navigation')
-                    result = await self.send_hotkey(['tab'])
+                for w in result["result"]["windows"]:
+                    if "confirm" in w["title"].lower() and "save" in w["title"].lower():
+                        confirm_dialog = w
+                        confirm_title = w["title"]
+                        print(f'   Found Confirm Save As dialog: "{confirm_title}"')
+                        break
+                if confirm_dialog:
+                    break
+        
+        if confirm_dialog:
+            # Use UI Automation to find and click the "Yes" button
+            yes_button = {"type": "Button", "title": "Yes", "index": 0}
+            result = await self._execute_tool("window_interact", {
+                "action": "click", "window_title": confirm_title, 
+                "control_identifier": yes_button
+            }, ["automation:window"])
+            if result["success"]:
+                print(f'   Clicked "Yes" button via UI Automation')
+            else:
+                # Fallback: try Tab to navigate to Yes, then Enter
+                print(f'   UI Automation failed, trying Tab navigation')
+                result = await self.send_hotkey(['tab'])
+                if result.success:
+                    await asyncio.sleep(0.2)
+                    result = await self.send_hotkey(['enter'])
                     if result.success:
-                        await asyncio.sleep(0.2)
-                        result = await self.send_hotkey(['enter'])
-                        if result.success:
-                            print(f'   Pressed Tab then Enter to confirm replace')
-                break
+                        print(f'   Pressed Tab then Enter to confirm replace')
         
         await asyncio.sleep(2)  # Wait for save to complete
         
@@ -786,6 +790,148 @@ class DesktopAutomation:
                 error=f"File not found after fallback save. Checked {len(possible_paths)} locations.",
                 details={**{"dialog_title": dialog_title}, **debug_info}
             )
+    
+    # ============================================================
+    # New Tab & Window Helpers (Discovered during testing)
+    # ============================================================
+    
+    async def open_new_tab(self, window_title: str) -> InteractionResult:
+        """
+        Open a new tab in a tabbed application (e.g., Notepad).
+        
+        Uses UI Automation to click the "Add New Tab" button.
+        Discovered: Notepad uses auto_id="AddButton" with title "Add New Tab".
+        """
+        cid = self._get_correlation_id("new_tab")
+        
+        # Try multiple selectors for the new tab button
+        new_tab_selectors = [
+            {"type": "Button", "auto_id": "AddButton", "index": 0},      # Notepad: "Add New Tab"
+            {"type": "Button", "title": "Add New Tab", "index": 0},     # Title match
+            {"type": "Button", "title": "New tab", "index": 0},         # Alternative title
+            {"type": "Button", "title": "+", "index": 0},               # Compact title
+            {"type": "Button", "auto_id": "NewTabButton", "index": 0},  # Other apps
+        ]
+        
+        for selector in new_tab_selectors:
+            result = await self._execute_tool("window_interact", {
+                "action": "click", "window_title": window_title, 
+                "control_identifier": selector
+            }, ["automation:window"], cid)
+            
+            if result["success"]:
+                await asyncio.sleep(0.5)
+                return InteractionResult(
+                    success=True,
+                    method_used=InteractionMethod.UI_AUTOMATION,
+                    details={"selector_used": selector}
+                )
+        
+        return InteractionResult(
+            success=False, method_used=InteractionMethod.UI_AUTOMATION,
+            error="Could not find new tab button with any known selector"
+        )
+    
+    async def open_new_tab_by_hwnd(self, hwnd: int) -> InteractionResult:
+        """
+        Open a new tab using window handle (HWND) instead of title.
+        More reliable for Notepad and other tabbed applications.
+        """
+        cid = self._get_correlation_id("new_tab_hwnd")
+        
+        # Try multiple selectors for the new tab button
+        new_tab_selectors = [
+            {"type": "Button", "auto_id": "AddButton", "index": 0},      # Notepad: "Add New Tab"
+            {"type": "Button", "title": "Add New Tab", "index": 0},     # Title match
+            {"type": "Button", "title": "New tab", "index": 0},         # Alternative title
+            {"type": "Button", "title": "+", "index": 0},               # Compact title
+            {"type": "Button", "auto_id": "NewTabButton", "index": 0},  # Other apps
+        ]
+        
+        for selector in new_tab_selectors:
+            result = await self._execute_tool("window_interact", {
+                "action": "click", "window_handle": hwnd, 
+                "control_identifier": selector
+            }, ["automation:window"], cid)
+            
+            if result["success"]:
+                await asyncio.sleep(0.5)
+                return InteractionResult(
+                    success=True,
+                    method_used=InteractionMethod.UI_AUTOMATION,
+                    details={"selector_used": selector}
+                )
+        
+        return InteractionResult(
+            success=False, method_used=InteractionMethod.UI_AUTOMATION,
+            error="Could not find new tab button with any known selector"
+        )
+    
+    async def get_current_window_title(self, process_name: str = "notepad", pid: int = None) -> str:
+        """
+        Get the current window title for a process.
+        Handles dynamic titles (e.g., Notepad adds * prefix when modified).
+        If pid is provided, match by PID to avoid stale windows.
+        """
+        result = await self._execute_tool("window_list", {
+            "filter_process": process_name
+        }, ["app:control"])
+        
+        if result["success"] and result["result"]["windows"]:
+            for w in result["result"]["windows"]:
+                if w["is_visible"] and process_name.lower() in w["title"].lower():
+                    # If PID is provided, match by PID to avoid stale windows
+                    if pid is not None and w["process_id"] != pid:
+                        continue
+                    return w["title"]
+        return ""
+    
+    async def ensure_fresh_document(self, window_title: str, process_name: str = "notepad", pid: int = None) -> InteractionResult:
+        """
+        Ensure we have a fresh, untitled document by opening a new tab.
+        Useful for Notepad and similar tabbed editors.
+        If pid is provided, use it to track the correct window.
+        """
+        # Open new tab
+        result = await self.open_new_tab(window_title)
+        if not result.success:
+            return result
+        
+        # Wait for new tab to settle and get updated title
+        await asyncio.sleep(1)
+        new_title = await self.get_current_window_title(process_name, pid)
+        
+        return InteractionResult(
+            success=True,
+            method_used=InteractionMethod.UI_AUTOMATION,
+            details={"new_window_title": new_title}
+        )
+    
+    async def save_file_with_fallback(self, window_title: str, filename: str, 
+                                       target_dir: str = None, process_name: str = "notepad", pid: int = None) -> InteractionResult:
+        """
+        Complete save workflow with automatic fallback.
+        Tries primary save_file, then fallback, then ensures fresh document if needed.
+        """
+        # Try primary save
+        result = await self.save_file(window_title, filename, target_dir)
+        if result.success:
+            return result
+        
+        # Try fallback
+        print(f"   Primary save failed: {result.error}. Trying fallback...")
+        result = await self.save_file_fallback(window_title, filename, target_dir)
+        if result.success:
+            return result
+        
+        # As last resort, ensure fresh document and retry
+        print(f"   Fallback save failed. Ensuring fresh document and retrying...")
+        fresh_result = await self.ensure_fresh_document(window_title, process_name, pid)
+        if fresh_result.success:
+            new_title = fresh_result.details.get("new_window_title", window_title)
+            result = await self.save_file_fallback(new_title, filename, target_dir)
+        
+        return result
     
     async def get_window_state(self, identifier: Union[str, int]) -> Optional[WindowInfo]:
         """Get current state of a window."""
@@ -1132,9 +1278,10 @@ class DesktopAutomation:
         return False
     
     async def _verify_foreground_window(self, identifier: Union[str, int]) -> bool:
-        """Verify the target window is in foreground."""
-        # Get current foreground window
+        """Verify the target window is in foreground using direct win32gui calls."""
         import win32gui
+        import win32process
+        
         fg_hwnd = win32gui.GetForegroundWindow()
         if not fg_hwnd:
             return False
@@ -1144,20 +1291,19 @@ class DesktopAutomation:
             # Check by PID
             _, fg_pid = win32process.GetWindowThreadProcessId(fg_hwnd)
             return fg_pid == identifier
-        else:
-            # Check by process name or title
-            import win32process
-            import psutil
+        elif isinstance(identifier, str) and identifier.endswith(".exe"):
+            # Check by process name
+            _, fg_pid = win32process.GetWindowThreadProcessId(fg_hwnd)
             try:
-                _, fg_pid = win32process.GetWindowThreadProcessId(fg_hwnd)
+                import psutil
                 fg_proc = psutil.Process(fg_pid)
-                if identifier.endswith(".exe"):
-                    return fg_proc.name().lower() == identifier.lower()
-                else:
-                    title = win32gui.GetWindowText(fg_hwnd)
-                    return identifier.lower() in title.lower()
+                return fg_proc.name().lower() == identifier.lower()
             except:
                 return False
+        else:
+            # Check by window title (substring match)
+            title = win32gui.GetWindowText(fg_hwnd)
+            return identifier.lower() in title.lower()
     
     # ============================================================
     # Evidence & Verification
