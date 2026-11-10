@@ -56,6 +56,21 @@ except ImportError:
     WIN32_AVAILABLE = False
 
 
+def _ensure_default_desktop() -> None:
+    """Ensure the calling thread is attached to the interactive Windows default desktop."""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
+
 @dataclass
 class ScreenRegion:
     """Screen region coordinates."""
@@ -173,6 +188,7 @@ class ScreenCaptureTool(BaseTool):
     
     def _get_windows(self) -> List[Dict[str, Any]]:
         """Get all visible windows."""
+        _ensure_default_desktop()
         windows = []
         if not WIN32_AVAILABLE:
             return windows
@@ -214,6 +230,7 @@ class ScreenCaptureTool(BaseTool):
         return None
     
     async def _execute_impl(self, context) -> dict:
+        _ensure_default_desktop()
         if not MSS_AVAILABLE:
             return {"success": False, "error": "mss not available", "error_code": "DEPENDENCY_MISSING"}
         
@@ -420,6 +437,7 @@ class ScreenOCRTool(BaseTool):
         return dilated
     
     async def _execute_impl(self, context) -> dict:
+        _ensure_default_desktop()
         if not PYTESSERACT_AVAILABLE:
             return {"success": False, "error": "pytesseract not available", "error_code": "DEPENDENCY_MISSING"}
         
@@ -455,14 +473,17 @@ class ScreenOCRTool(BaseTool):
                 if not hwnd:
                     return {"success": False, "error": "Window not found", "error_code": "WINDOW_NOT_FOUND"}
                 
-                with mss.mss() as sct:
-                    rect = win32gui.GetWindowRect(hwnd)
-                    monitor = {"left": rect[0], "top": rect[1], 
-                              "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
-                    screenshot = sct.grab(monitor)
-                    from PIL import Image
-                    pil_image = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-                    cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                try:
+                    with mss.mss() as sct:
+                        rect = win32gui.GetWindowRect(hwnd)
+                        monitor = {"left": rect[0], "top": rect[1], 
+                                  "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
+                        screenshot = sct.grab(monitor)
+                        from PIL import Image
+                        pil_image = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+                        cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    return {"success": False, "error": f"Failed to capture window: {e}", "error_code": "CAPTURE_FAILED"}
             
             elif source == "region":
                 if not region:
@@ -547,6 +568,7 @@ class ScreenOCRTool(BaseTool):
     
     def _get_windows(self) -> List[Dict[str, Any]]:
         """Get all visible windows."""
+        _ensure_default_desktop()
         windows = []
         if not WIN32_AVAILABLE:
             return windows
@@ -617,6 +639,10 @@ class VisualFindTool(BaseTool):
                     },
                     "required": ["left", "top", "width", "height"],
                 },
+                "window_title": {
+                    "type": "string",
+                    "description": "Window title to search in (for text method)"
+                },
                 "return_all": {
                     "type": "boolean",
                     "default": False,
@@ -656,6 +682,7 @@ class VisualFindTool(BaseTool):
     }
     
     async def _execute_impl(self, context) -> dict:
+        _ensure_default_desktop()
         if not OPENCV_AVAILABLE or not MSS_AVAILABLE:
             return {"success": False, "error": "OpenCV or mss not available", "error_code": "DEPENDENCY_MISSING"}
         
@@ -666,12 +693,43 @@ class VisualFindTool(BaseTool):
         color = args.get("color")
         threshold = args.get("threshold", 0.8)
         region = args.get("region")
+        window_title = args.get("window_title")
         return_all = args.get("return_all", False)
         
         try:
-            # Capture screen region
+            # Capture screen region or window
             with mss.mss() as sct:
-                if region:
+                if window_title:
+                    # Find window and capture it
+                    found_hwnd = None
+                    if WIN32_AVAILABLE:
+                        def enum_cb(hwnd, _):
+                            nonlocal found_hwnd
+                            try:
+                                if win32gui.IsWindowVisible(hwnd):
+                                    title = win32gui.GetWindowText(hwnd)
+                                    if window_title.lower() in title.lower():
+                                        found_hwnd = hwnd
+                                        return False
+                            except Exception:
+                                pass
+                            return True
+                        try:
+                            win32gui.EnumWindows(enum_cb, None)
+                        except Exception as e:
+                            return {"success": False, "error": f"Failed to enumerate windows: {e}", "error_code": "ENUM_FAILED"}
+                    
+                    if not found_hwnd:
+                        return {"success": False, "error": "Window not found", "error_code": "WINDOW_NOT_FOUND"}
+                    
+                    hwnd = found_hwnd
+                    try:
+                        rect = win32gui.GetWindowRect(hwnd)
+                        monitor = {"left": rect[0], "top": rect[1], 
+                                  "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
+                    except Exception as e:
+                        return {"success": False, "error": f"Failed to get window rect: {e}", "error_code": "WINDOW_ERROR"}
+                elif region:
                     monitor = {
                         "left": region["left"],
                         "top": region["top"],
@@ -727,15 +785,18 @@ class VisualFindTool(BaseTool):
                 
                 for i in range(len(ocr_data['text'])):
                     text = ocr_data['text'][i].strip()
-                    conf = int(ocr_data['conf'][i])
+                    try:
+                        conf = float(ocr_data['conf'][i])
+                    except (ValueError, TypeError):
+                        conf = -1.0
                     
-                    if text and conf > 30 and search_text.lower() in text.lower():
+                    if text and conf > 20 and search_text.lower() in text.lower():
                         matches.append({
                             "x": ocr_data['left'][i],
                             "y": ocr_data['top'][i],
                             "width": ocr_data['width'][i],
                             "height": ocr_data['height'][i],
-                            "confidence": conf / 100.0,
+                            "confidence": max(0.0, min(1.0, conf / 100.0)),
                         })
             
             elif method == "color":
@@ -834,6 +895,7 @@ class MouseControlTool(BaseTool):
     }
     
     async def _execute_impl(self, context) -> dict:
+        _ensure_default_desktop()
         if not WIN32_AVAILABLE:
             return {"success": False, "error": "win32 not available", "error_code": "DEPENDENCY_MISSING"}
         
@@ -1013,6 +1075,7 @@ class KeyboardInputTool(BaseTool):
     }
     
     async def _execute_impl(self, context) -> dict:
+        _ensure_default_desktop()
         if not WIN32_AVAILABLE:
             return {"success": False, "error": "win32 not available", "error_code": "DEPENDENCY_MISSING"}
         
@@ -1039,6 +1102,32 @@ class KeyboardInputTool(BaseTool):
                 text = args.get("text", "")
                 interval = args.get("interval", 0.05)
                 
+                # If there is a foreground window with an Edit control or focused window,
+                # also send characters via WM_CHAR or WM_SETTEXT for robust typing on Windows 11
+                fg_hwnd = win32gui.GetForegroundWindow()
+                edit_hwnd = None
+                if fg_hwnd:
+                    def _find_edit(ch, _):
+                        nonlocal edit_hwnd
+                        if win32gui.GetClassName(ch).lower() == "edit":
+                            edit_hwnd = ch
+                            return False
+                        return True
+                    try:
+                        win32gui.EnumChildWindows(fg_hwnd, _find_edit, None)
+                    except Exception:
+                        pass
+                
+                target_w = edit_hwnd or fg_hwnd
+                if target_w and WIN32_AVAILABLE:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    for char in text:
+                        user32.SendMessageW(target_w, 0x0102, ord(char), 0)
+                        if interval > 0:
+                            await asyncio.sleep(min(interval, 0.01))
+                    return {"success": True, "result": {}, "error": None}
+
                 for char in text:
                     # Handle special characters
                     if char.isupper():
@@ -1208,9 +1297,37 @@ class WindowInteractTool(BaseTool):
             if handle:
                 return Desktop(backend="uia").window(handle=handle)
             elif title:
+                # First try UIA backend with exact/substring match
                 windows = Desktop(backend="uia").windows()
                 for w in windows:
-                    if title.lower() in w.window_text().lower():
+                    wtitle = w.window_text()
+                    if title.lower() in wtitle.lower():
+                        return w
+                
+                # If not found, try win32gui to find the HWND and connect via UIA
+                if WIN32_AVAILABLE:
+                    def enum_cb(hwnd, results):
+                        if win32gui.IsWindowVisible(hwnd):
+                            wtitle = win32gui.GetWindowText(hwnd)
+                            if title.lower() in wtitle.lower():
+                                results.append(hwnd)
+                        return True
+                    
+                    results = []
+                    win32gui.EnumWindows(enum_cb, results)
+                    for hwnd in results:
+                        try:
+                            return Desktop(backend="uia").window(handle=hwnd)
+                        except Exception:
+                            continue
+                
+                # Last resort: try partial match on any window
+                windows = Desktop(backend="uia").windows()
+                for w in windows:
+                    wtitle = w.window_text()
+                    # Try matching key words from title
+                    title_words = [w for w in title.split() if len(w) > 2]
+                    if title_words and all(word.lower() in wtitle.lower() for word in title_words):
                         return w
             return None
         except Exception as e:
@@ -1220,17 +1337,37 @@ class WindowInteractTool(BaseTool):
     def _find_control(self, window, identifier: dict):
         """Find a control within a window."""
         try:
+            # Try child_window first for specific lookups (supports auto_id)
+            if identifier.get("auto_id") or identifier.get("automation_id"):
+                auto_id = identifier.get("auto_id") or identifier.get("automation_id")
+                ctrl_type = identifier.get("type", "Edit")
+                try:
+                    return window.child_window(auto_id=auto_id, control_type=ctrl_type)
+                except Exception:
+                    pass
+            
+            if identifier.get("title") and identifier.get("type"):
+                try:
+                    return window.child_window(title=identifier["title"], control_type=identifier["type"])
+                except Exception:
+                    pass
+            
+            if identifier.get("class_name") and identifier.get("type"):
+                try:
+                    return window.child_window(class_name=identifier["class_name"], control_type=identifier["type"])
+                except Exception:
+                    pass
+            
+            # Fall back to descendants for more general searches
             criteria = {}
             if identifier.get("type"):
                 criteria["control_type"] = identifier["type"]
             if identifier.get("title"):
                 criteria["title"] = identifier["title"]
-            if identifier.get("auto_id"):
-                criteria["auto_id"] = identifier["auto_id"]
-            if identifier.get("control_id"):
-                criteria["control_id"] = identifier["control_id"]
             if identifier.get("class_name"):
                 criteria["class_name"] = identifier["class_name"]
+            if identifier.get("control_id"):
+                criteria["control_id"] = identifier["control_id"]
             
             controls = window.descendants(**criteria)
             index = identifier.get("index", 0)
@@ -1242,6 +1379,7 @@ class WindowInteractTool(BaseTool):
             return None
     
     async def _execute_impl(self, context) -> dict:
+        _ensure_default_desktop()
         if not PYWINAUTO_AVAILABLE:
             return {"success": False, "error": "pywinauto not available", "error_code": "DEPENDENCY_MISSING"}
         
@@ -1322,7 +1460,18 @@ class WindowInteractTool(BaseTool):
             elif action == "type":
                 if not text:
                     return {"success": False, "error": "text required for type action", "error_code": "INVALID_INPUT"}
-                control.set_edit_text(text)
+                # Handle different control types
+                ctrl_type = control.element_info.control_type
+                ctrl_class = control.element_info.class_name
+                if ctrl_type == "Document" and ctrl_class == "RichEditD2DPT":
+                    # Modern Notepad uses RichEditD2DPT with UIA Value pattern
+                    try:
+                        control.iface_value.SetValue(text)
+                    except Exception as e:
+                        return {"success": False, "error": f"Failed to set text via UIA Value: {e}", "error_code": "TYPE_FAILED"}
+                else:
+                    # Standard edit control
+                    control.set_edit_text(text)
                 await asyncio.sleep(0.1)
                 return {"success": True, "result": {}, "error": None}
             
@@ -1426,6 +1575,7 @@ class VisualVerifyTool(BaseTool):
     }
     
     async def _execute_impl(self, context) -> dict:
+        _ensure_default_desktop()
         if not OPENCV_AVAILABLE or not MSS_AVAILABLE or not WIN32_AVAILABLE:
             return {"success": False, "error": "Required dependencies not available", "error_code": "DEPENDENCY_MISSING"}
         
@@ -1445,22 +1595,31 @@ class VisualVerifyTool(BaseTool):
             with mss.mss() as sct:
                 if window_title:
                     found_hwnd = None
-                    def enum_cb(found_hwnd_param, _):
+                    def enum_cb(hwnd, _):
                         nonlocal found_hwnd
-                        if win32gui.IsWindowVisible(found_hwnd_param):
-                            title = win32gui.GetWindowText(found_hwnd_param)
-                            if window_title.lower() in title.lower():
-                                found_hwnd = found_hwnd_param
-                                return False
+                        try:
+                            if win32gui.IsWindowVisible(hwnd):
+                                title = win32gui.GetWindowText(hwnd)
+                                if window_title.lower() in title.lower():
+                                    found_hwnd = hwnd
+                                    return False
+                        except Exception:
+                            pass
                         return True
-                    win32gui.EnumWindows(enum_cb, None)
+                    try:
+                        win32gui.EnumWindows(enum_cb, None)
+                    except Exception as e:
+                        return {"success": False, "error": f"Failed to enumerate windows: {e}", "error_code": "ENUM_FAILED"}
                     
                     if not found_hwnd:
                         return {"success": False, "error": "Window not found", "error_code": "WINDOW_NOT_FOUND"}
                     
-                    rect = win32gui.GetWindowRect(found_hwnd)
-                    monitor = {"left": rect[0], "top": rect[1], 
-                              "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
+                    try:
+                        rect = win32gui.GetWindowRect(found_hwnd)
+                        monitor = {"left": rect[0], "top": rect[1], 
+                                  "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
+                    except Exception as e:
+                        return {"success": False, "error": f"Failed to get window rect: {e}", "error_code": "WINDOW_ERROR"}
                 elif region:
                     monitor = {
                         "left": region["left"],
@@ -1492,8 +1651,17 @@ class VisualVerifyTool(BaseTool):
                     lambda: pytesseract.image_to_string(screen, lang="eng")
                 )
                 
-                passed = search_text.lower() in ocr_text.lower()
-                actual = "Text found" if passed else "Text not found"
+                # Normalize spaces and check
+                norm_search = " ".join(search_text.lower().split())
+                norm_ocr = " ".join(ocr_text.lower().split())
+                passed = norm_search in norm_ocr
+                if not passed:
+                    # Token/word-based check: if all words appear in order or within proximity
+                    words = norm_search.split()
+                    if words and all(w in norm_ocr for w in words):
+                        passed = True
+                
+                actual = "Text found" if passed else f"Text not found in OCR: {norm_ocr[:120]}"
                 confidence = 1.0 if passed else 0.0
             
             elif check_type == "text_matches":

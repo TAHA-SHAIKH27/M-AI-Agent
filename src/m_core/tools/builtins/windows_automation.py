@@ -36,6 +36,20 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 
+def _ensure_default_desktop() -> None:
+    """Ensure the calling thread is attached to the interactive Windows default desktop."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
+
 @dataclass
 class WindowInfo:
     """Information about a window."""
@@ -110,7 +124,7 @@ class AppLaunchTool(BaseTool):
             "firefox": "firefox.exe",
             "edge": "msedge.exe",
             "outlook": "outlook.exe",
-            "word": "winword.exe",
+            "word": r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
             "excel": "excel.exe",
             "powerpoint": "powerpnt.exe",
             "teams": "teams.exe",
@@ -287,6 +301,7 @@ class AppControlTool(BaseTool):
     
     def _get_windows(self) -> List[Dict[str, Any]]:
         """Get list of all visible windows."""
+        _ensure_default_desktop()
         windows = []
         if not WIN32_AVAILABLE:
             return windows
@@ -295,8 +310,6 @@ class AppControlTool(BaseTool):
             if win32gui.IsWindowVisible(hwnd):
                 try:
                     title = win32gui.GetWindowText(hwnd)
-                    if not title:
-                        return True
                     class_name = win32gui.GetClassName(hwnd)
                     _, pid = win32process.GetWindowThreadProcessId(hwnd)
                     process_name = ""
@@ -419,12 +432,120 @@ class AppControlTool(BaseTool):
                         return {"success": False, "error": f"Failed to get window info: {e}", "error_code": "INFO_FAILED"}
             
             elif action == "focus":
-                try:
-                    win32gui.SetForegroundWindow(hwnd_target)
-                    win32gui.ShowWindow(hwnd_target, win32con.SW_RESTORE)
-                    return {"success": True, "result": {"focused": True}, "error": None}
-                except Exception as e:
-                    return {"success": False, "error": f"Failed to focus window: {e}", "error_code": "FOCUS_FAILED"}
+                # Use robust window activation with AttachThreadInput to bypass ERROR_BUSY
+                max_retries = 3
+                retry_delay = 1.0
+                
+                for attempt in range(max_retries):
+                    hwnd_target = self._find_window(
+                        title=window_title,
+                        process_name=process_name,
+                        pid=pid,
+                        hwnd=hwnd
+                    )
+                    
+                    if not hwnd_target:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    
+                    try:
+                        # Check if window is minimized and restore first
+                        if win32gui.IsIconic(hwnd_target):
+                            win32gui.ShowWindow(hwnd_target, win32con.SW_RESTORE)
+                            await asyncio.sleep(0.3)
+                        
+                        # Get current foreground window and thread info
+                        current_fg_hwnd = win32gui.GetForegroundWindow()
+                        current_thread_id = win32api.GetCurrentThreadId()
+                        target_thread_id, _ = win32process.GetWindowThreadProcessId(hwnd_target)
+                        fg_thread_id, _ = win32process.GetWindowThreadProcessId(current_fg_hwnd) if current_fg_hwnd else (0, 0)
+                        
+                        # Attach to target thread input queue
+                        attached = False
+                        if target_thread_id != current_thread_id:
+                            try:
+                                attached = win32process.AttachThreadInput(current_thread_id, target_thread_id, True)
+                            except Exception as e:
+                                if "Access is denied" in str(e) or "denied" in str(e).lower():
+                                    logger.warning(f"AttachThreadInput access denied, skipping: {e}")
+                                    attached = False
+                                else:
+                                    raise
+                        
+                        try:
+                            # Also attach to current foreground thread if different
+                            fg_attached = False
+                            if fg_thread_id and fg_thread_id != current_thread_id and fg_thread_id != target_thread_id:
+                                try:
+                                    fg_attached = win32process.AttachThreadInput(current_thread_id, fg_thread_id, True)
+                                except Exception as e:
+                                    if "Access is denied" in str(e) or "denied" in str(e).lower():
+                                        logger.warning(f"AttachThreadInput (fg) access denied, skipping: {e}")
+                                        fg_attached = False
+                                    else:
+                                        raise
+                            
+                            # Bring window to front
+                            win32gui.ShowWindow(hwnd_target, win32con.SW_SHOW)
+                            win32gui.SetWindowPos(
+                                hwnd_target, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+                            )
+                            win32gui.SetWindowPos(
+                                hwnd_target, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+                                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+                            )
+                            
+                            # Force foreground
+                            win32gui.SetForegroundWindow(hwnd_target)
+                            
+                            # Verify activation
+                            await asyncio.sleep(0.2)
+                            if win32gui.GetForegroundWindow() == hwnd_target:
+                                return {
+                                    "success": True, 
+                                    "result": {"focused": True, "hwnd": hwnd_target}, 
+                                    "error": None
+                                }
+                            else:
+                                # Try alternative: SetActiveWindow
+                                win32gui.SetActiveWindow(hwnd_target)
+                                await asyncio.sleep(0.2)
+                                if win32gui.GetForegroundWindow() == hwnd_target:
+                                    return {
+                                        "success": True, 
+                                        "result": {"focused": True, "hwnd": hwnd_target}, 
+                                        "error": None
+                                    }
+                                # Try one more time with AllowSetForegroundWindow
+                                import ctypes
+                                ctypes.windll.user32.AllowSetForegroundWindow(ctypes.windll.kernel32.GetCurrentProcessId())
+                                win32gui.SetForegroundWindow(hwnd_target)
+                                await asyncio.sleep(0.2)
+                                if win32gui.GetForegroundWindow() == hwnd_target:
+                                    return {
+                                        "success": True, 
+                                        "result": {"focused": True, "hwnd": hwnd_target}, 
+                                        "error": None
+                                    }
+                                
+                                raise Exception("Failed to activate window - not in foreground after all attempts")
+                        
+                        finally:
+                            # Detach thread input
+                            if attached:
+                                win32process.AttachThreadInput(current_thread_id, target_thread_id, False)
+                            if fg_attached:
+                                win32process.AttachThreadInput(current_thread_id, fg_thread_id, False)
+                        
+                    except Exception as e:
+                        logger.warning(f"Focus attempt {attempt + 1} failed: {e}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            continue
+                        return {"success": False, "error": f"Failed to focus window after {max_retries} attempts: {e}", "error_code": "FOCUS_FAILED"}
+                
+                return {"success": False, "error": f"Window not found after {max_retries} retries", "error_code": "WINDOW_NOT_FOUND"}
             
             elif action == "minimize":
                 try:
@@ -747,6 +868,7 @@ class WindowListTool(BaseTool):
     
     def _get_all_windows(self) -> List[Dict[str, Any]]:
         """Get all windows."""
+        _ensure_default_desktop()
         windows = []
         if not WIN32_AVAILABLE:
             return windows
