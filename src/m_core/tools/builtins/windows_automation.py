@@ -81,7 +81,7 @@ class AppLaunchTool(BaseTool):
                 "working_directory": {"type": "string", "description": "Working directory for the process"},
                 "run_as_admin": {"type": "boolean", "default": False, "description": "Run as administrator"},
                 "wait": {"type": "boolean", "default": False, "description": "Wait for process to complete"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["app_name"],
             "additionalProperties": False,
@@ -162,9 +162,8 @@ class AppLaunchTool(BaseTool):
         if not app_name:
             return {"success": False, "error": "app_name is required", "error_code": "INVALID_INPUT"}
         
-        # Validate approval
-        if not args.get("approved", False):
-            return {"success": False, "error": "Explicit approval required to launch applications", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         app_path = self._get_app_path(app_name)
         
@@ -274,7 +273,7 @@ class AppControlTool(BaseTool):
                 "process_name": {"type": "string", "description": "Process name to match (e.g., 'notepad.exe')"},
                 "process_id": {"type": "integer", "description": "Process ID to target"},
                 "hwnd": {"type": "integer", "description": "Window handle (HWND)"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -376,10 +375,8 @@ class AppControlTool(BaseTool):
         if not WIN32_AVAILABLE:
             return {"success": False, "error": "Windows automation dependencies not available", "error_code": "DEPENDENCY_MISSING"}
         
-        # Validate approval for destructive actions
-        if action in ["close", "minimize", "maximize", "focus", "restore"]:
-            if not context.arguments.get("approved", False):
-                return {"success": False, "error": "Explicit approval required for window control", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         hwnd_target = self._find_window(
             title=window_title,
@@ -598,7 +595,6 @@ class PowerShellTool(BaseTool):
                 "execution_policy": {"type": "string", "default": "RemoteSigned", "enum": ["Restricted", "AllSigned", "RemoteSigned", "Unrestricted", "Bypass"], "description": "Execution policy"},
                 "timeout_seconds": {"type": "integer", "default": 60, "description": "Timeout in seconds"},
                 "run_as_admin": {"type": "boolean", "default": False, "description": "Run as administrator"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
                 "approval_token": {"type": "string", "description": "Approval token"},
             },
             "required": ["command"],
@@ -636,9 +632,8 @@ class PowerShellTool(BaseTool):
         if not command:
             return {"success": False, "error": "command is required", "error_code": "INVALID_INPUT"}
         
-        # Validate approval
-        if not args.get("approved", False):
-            return {"success": False, "error": "Explicit approval required for PowerShell execution", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         try:
             # Build PowerShell command
@@ -1059,7 +1054,7 @@ class SystemCommandTool(BaseTool):
                 "arguments": {"type": "string", "default": "", "description": "Arguments to pass"},
                 "timeout_seconds": {"type": "integer", "default": 30, "description": "Timeout in seconds"},
                 "run_as_admin": {"type": "boolean", "default": False, "description": "Run as administrator"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["command"],
             "additionalProperties": False,
@@ -1094,8 +1089,8 @@ class SystemCommandTool(BaseTool):
         if not command:
             return {"success": False, "error": "command is required", "error_code": "INVALID_INPUT"}
         
-        if not args.get("approved", False):
-            return {"success": False, "error": "Explicit approval required for system commands", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         try:
             cmd = f"cmd.exe /c {command}"

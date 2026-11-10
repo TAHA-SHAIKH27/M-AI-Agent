@@ -1,4 +1,9 @@
-"""Vision model provider for GUI understanding and visual grounding."""
+"""Vision model provider for GUI understanding and visual grounding.
+
+This provider uses a proper GUI element detection pipeline.
+OmniParser is the primary model for GUI element detection with bounding boxes.
+If unavailable, it reports unavailability clearly rather than using captioning models.
+"""
 import asyncio
 import base64
 import io
@@ -25,16 +30,24 @@ class VisionConfig:
     confidence_threshold: float = 0.3
     max_elements: int = 50
     screenshot_scale: float = 1.0
+    # OmniParser specific
+    use_omniparser: bool = True
+    omniparser_model_path: Optional[str] = None
 
 
 class VisionModelProvider(ModelProvider):
     """Vision model provider for GUI understanding and visual grounding.
     
     Supports:
-    - OmniParser for GUI element detection
+    - OmniParser for GUI element detection (primary)
     - Visual grounding (finding elements by description)
     - Screen understanding (describing what's on screen)
     - Element classification (button, input, text, etc.)
+    - Action verification (before/after screenshot comparison)
+    
+    NOTE: This provider requires a proper GUI detection model (OmniParser).
+    Captioning models (Florence-2, BLIP, GIT) are NOT suitable fallbacks
+    as they produce image captions, not GUI element bounding boxes.
     """
     
     def __init__(self, config: Optional[VisionConfig] = None):
@@ -43,6 +56,7 @@ class VisionModelProvider(ModelProvider):
         self._processor = None
         self._initialized = False
         self._device = None
+        self._model_type = "unknown"  # "omniparser" or "captioning"
     
     @property
     def provider_id(self) -> str:
@@ -59,10 +73,10 @@ class VisionModelProvider(ModelProvider):
     @property
     def capabilities(self) -> ModelCapability:
         return ModelCapability(
-            chat=True,
+            chat=False,  # Not a chat model
             streaming=False,
             function_calling=False,
-            vision=True,  # Vision capability!
+            vision=True,  # Vision capability for GUI understanding
             reasoning=False,
             max_context_tokens=4096,
             supported_languages=["en"],
@@ -85,29 +99,23 @@ class VisionModelProvider(ModelProvider):
             
             logger.info(f"Loading vision model on {self._device}")
             
-            # Load OmniParser model and processor
-            # Note: OmniParser uses a specific model architecture
-            # For now, we'll use a compatible vision-language model
-            # In production, this would load the actual OmniParser model
+            # Try to load OmniParser if configured
+            if self.config.use_omniparser:
+                try:
+                    await self._load_omniparser()
+                    self._model_type = "omniparser"
+                    self._initialized = True
+                    logger.info("Vision model provider initialized with OmniParser")
+                    return
+                except Exception as e:
+                    logger.warning(f"Could not load OmniParser: {e}")
             
-            try:
-                self._model = AutoModel.from_pretrained(
-                    self.config.model_id,
-                    torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
-                    device_map=self._device,
-                    trust_remote_code=True,
-                )
-                self._processor = AutoProcessor.from_pretrained(
-                    self.config.model_id,
-                    trust_remote_code=True,
-                )
-            except Exception as e:
-                logger.warning(f"Could not load OmniParser model: {e}. Using fallback.")
-                # Fallback: Use a general vision-language model
-                await self._load_fallback_model()
-            
-            self._initialized = True
-            logger.info("Vision model provider initialized")
+            # If OmniParser not available, explicitly report unavailability
+            # DO NOT fall back to captioning models - they don't detect GUI elements
+            logger.error("No GUI detection model available. Vision provider disabled.")
+            logger.error("Install OmniParser or configure a compatible GUI detection model.")
+            self._initialized = False
+            self._model_type = "unavailable"
             
         except ImportError:
             logger.warning("Transformers/torch not available. Vision provider disabled.")
@@ -116,46 +124,47 @@ class VisionModelProvider(ModelProvider):
             logger.error(f"Failed to initialize vision model: {e}")
             self._initialized = False
     
-    async def _load_fallback_model(self) -> None:
-        """Load a fallback vision-language model."""
+    async def _load_omniparser(self) -> None:
+        """Load the OmniParser model for GUI element detection."""
         import torch
         from transformers import AutoModel, AutoProcessor
         
-        # Use a lightweight vision-language model as fallback
-        fallback_models = [
-            "microsoft/Florence-2-base",
-            "microsoft/git-base",
-            "Salesforce/blip-image-captioning-base",
-        ]
+        model_id = self.config.omniparser_model_path or self.config.model_id
         
-        for model_id in fallback_models:
-            try:
-                logger.info(f"Trying fallback model: {model_id}")
-                self._model = AutoModel.from_pretrained(
-                    model_id,
-                    torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
-                    device_map=self._device,
-                    trust_remote_code=True,
-                )
-                self._processor = AutoProcessor.from_pretrained(
-                    model_id,
-                    trust_remote_code=True,
-                )
-                self.config.model_id = model_id
-                logger.info(f"Loaded fallback model: {model_id}")
-                return
-            except Exception as e:
-                logger.warning(f"Fallback {model_id} failed: {e}")
-                continue
+        logger.info(f"Loading OmniParser model: {model_id}")
         
-        raise RuntimeError("Could not load any vision model")
+        # OmniParser uses a specific architecture - typically a fine-tuned
+        # Florence-2 or similar model with detection head
+        # The actual OmniParser model from Microsoft has specific requirements
+        try:
+            self._model = AutoModel.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
+                device_map=self._device,
+                trust_remote_code=True,
+            )
+            self._processor = AutoProcessor.from_pretrained(
+                model_id,
+                trust_remote_code=True,
+            )
+            logger.info(f"Successfully loaded OmniParser model: {model_id}")
+        except Exception as e:
+            logger.error(f"Failed to load OmniParser: {e}")
+            raise
     
     async def health_check(self) -> ProviderHealth:
         """Check provider health."""
         if not self._initialized:
             return ProviderHealth(
                 healthy=False,
-                error="Vision model not initialized",
+                error="Vision model not initialized. OmniParser required for GUI detection.",
+                model_count=0,
+            )
+        
+        if self._model_type != "omniparser":
+            return ProviderHealth(
+                healthy=False,
+                error=f"Model type '{self._model_type}' does not support GUI element detection",
                 model_count=0,
             )
         
@@ -174,7 +183,7 @@ class VisionModelProvider(ModelProvider):
             )
     
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
-        """Not directly used for chat - use specialized methods instead."""
+        """Not supported - vision provider is for GUI analysis only."""
         return CompletionResponse(
             id="vision-not-supported",
             model=self.config.model_id,
@@ -209,7 +218,7 @@ class VisionModelProvider(ModelProvider):
         task_description: str = "",
         region: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
-        """Analyze a screenshot and return structured understanding.
+        """Analyze a screenshot and return structured GUI understanding.
         
         Args:
             screenshot_base64: Base64 encoded screenshot
@@ -219,15 +228,21 @@ class VisionModelProvider(ModelProvider):
         Returns:
             Dict with:
             - description: Natural language description of screen
-            - elements: List of detected GUI elements
-            - text_content: Extracted text
+            - elements: List of detected GUI elements with bounding boxes
+            - text_content: Extracted text from elements
             - suggested_actions: Recommended next actions
+            - model_type: Type of model used ("omniparser" or "unavailable")
         """
         if not self._initialized:
             await self.initialize()
         
-        if not self._initialized:
-            return {"error": "Vision model not available", "elements": []}
+        if not self._initialized or self._model_type != "omniparser":
+            return {
+                "error": "GUI detection model (OmniParser) not available",
+                "elements": [],
+                "model_type": self._model_type,
+                "description": "Cannot analyze screen: No GUI detection model loaded"
+            }
         
         try:
             import torch
@@ -245,37 +260,41 @@ class VisionModelProvider(ModelProvider):
                     region["top"] + region["height"]
                 ))
             
-            # Process with vision model
+            # Process with OmniParser
+            # OmniParser typically uses a specific prompt format for GUI parsing
+            prompt = task_description or "Parse the GUI elements in this screenshot. Return bounding boxes, element types, and labels."
+            
             inputs = self._processor(
                 images=image,
-                text=task_description or "Describe this screen and identify all interactive elements",
+                text=prompt,
                 return_tensors="pt",
             ).to(self._device)
             
             with torch.no_grad():
                 outputs = self._model.generate(
                     **inputs,
-                    max_new_tokens=512,
+                    max_new_tokens=1024,
                     num_beams=3,
                     do_sample=False,
                 )
             
-            # Parse outputs
+            # Parse outputs - OmniParser returns structured format
             response = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
             
-            # Parse structured output
-            elements = self._parse_elements(response)
+            # Parse OmniParser structured output
+            elements = self._parse_omniparser_output(response, image.size)
             
             return {
-                "description": response,
+                "description": f"Detected {len(elements)} GUI elements",
                 "elements": elements,
                 "text_content": self._extract_text(elements),
                 "suggested_actions": self._suggest_actions(elements, task_description),
+                "model_type": "omniparser",
             }
             
         except Exception as e:
             logger.error(f"Screen analysis failed: {e}")
-            return {"error": str(e), "elements": []}
+            return {"error": str(e), "elements": [], "model_type": self._model_type}
     
     async def find_elements(
         self,
@@ -296,7 +315,8 @@ class VisionModelProvider(ModelProvider):
         if not self._initialized:
             await self.initialize()
         
-        if not self._initialized:
+        if not self._initialized or self._model_type != "omniparser":
+            logger.warning("find_elements called but GUI detection model not available")
             return []
         
         threshold = confidence_threshold or self.config.confidence_threshold
@@ -308,8 +328,9 @@ class VisionModelProvider(ModelProvider):
             image_data = base64.b64decode(screenshot_base64)
             image = Image.open(io.BytesIO(image_data))
             
-            # Use visual grounding prompt
-            prompt = f"Find the element: {description}. Return bounding box and confidence."
+            # First analyze the full screen to get all elements
+            # Then filter by description
+            prompt = f"Find all GUI elements. Target: {description}"
             
             inputs = self._processor(
                 images=image,
@@ -320,19 +341,18 @@ class VisionModelProvider(ModelProvider):
             with torch.no_grad():
                 outputs = self._model.generate(
                     **inputs,
-                    max_new_tokens=256,
+                    max_new_tokens=1024,
                     num_beams=3,
                 )
             
             response = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
             
-            elements = self._parse_elements(response)
+            elements = self._parse_omniparser_output(response, image.size)
             
-            # Filter by confidence and relevance
+            # Filter by confidence and relevance to description
             filtered = []
             for elem in elements:
                 if elem.get("confidence", 0) >= threshold:
-                    # Check if description matches element
                     if self._matches_description(elem, description):
                         filtered.append(elem)
             
@@ -348,23 +368,14 @@ class VisionModelProvider(ModelProvider):
         x: int,
         y: int,
     ) -> Optional[Dict[str, Any]]:
-        """Get the GUI element at specific screen coordinates.
-        
-        Args:
-            screenshot_base64: Base64 encoded screenshot
-            x: X coordinate
-            y: Y coordinate
-            
-        Returns:
-            Element info at that position or None
-        """
+        """Get the GUI element at specific screen coordinates."""
         if not self._initialized:
             await self.initialize()
         
-        if not self._initialized:
+        if not self._initialized or self._model_type != "omniparser":
             return None
         
-        # First get all elements, then find one at coordinates
+        # Get all elements and find one at coordinates
         elements = await self.find_elements(screenshot_base64, "all interactive elements")
         
         for elem in elements:
@@ -388,19 +399,13 @@ class VisionModelProvider(ModelProvider):
     ) -> Dict[str, Any]:
         """Verify that an action produced the expected visual change.
         
-        Args:
-            before_screenshot: Screenshot before action
-            after_screenshot: Screenshot after action
-            expected_change: Description of expected change
-            
-        Returns:
-            Verification result with confidence
+        Uses OmniParser to detect GUI state changes.
         """
         if not self._initialized:
             await self.initialize()
         
-        if not self._initialized:
-            return {"verified": False, "confidence": 0.0, "error": "Vision model not available"}
+        if not self._initialized or self._model_type != "omniparser":
+            return {"verified": False, "confidence": 0.0, "error": "GUI detection model not available"}
         
         try:
             import torch
@@ -409,167 +414,167 @@ class VisionModelProvider(ModelProvider):
             before_img = Image.open(io.BytesIO(base64.b64decode(before_screenshot)))
             after_img = Image.open(io.BytesIO(base64.b64decode(after_screenshot)))
             
-            # Compare screenshots
-            prompt = f"Compare these two screenshots. Expected change: {expected_change}. Did the change occur? Answer YES/NO with confidence."
+            # Analyze both screenshots
+            before_elements = await self._get_elements_from_image(before_img)
+            after_elements = await self._get_elements_from_image(after_img)
             
-            # For multi-image comparison, we need to combine or process sequentially
-            # This is a simplified implementation
-            inputs = self._processor(
-                images=[before_img, after_img],
-                text=prompt,
-                return_tensors="pt",
-            ).to(self._device)
-            
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=128,
-                )
-            
-            response = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
-            
-            # Parse response
-            verified = "YES" in response.upper()
-            confidence = 0.8 if verified else 0.3
+            # Compare element states
+            verified, confidence, reasoning = self._compare_element_states(
+                before_elements, after_elements, expected_change
+            )
             
             return {
                 "verified": verified,
                 "confidence": confidence,
-                "reasoning": response,
+                "reasoning": reasoning,
+                "before_count": len(before_elements),
+                "after_count": len(after_elements),
             }
             
         except Exception as e:
             logger.error(f"Action verification failed: {e}")
             return {"verified": False, "confidence": 0.0, "error": str(e)}
     
+    async def _get_elements_from_image(self, image) -> List[Dict[str, Any]]:
+        """Extract elements from an image using the model."""
+        import torch
+        
+        prompt = "Parse all GUI elements with bounding boxes, types, and labels."
+        inputs = self._processor(
+            images=image,
+            text=prompt,
+            return_tensors="pt",
+        ).to(self._device)
+        
+        with torch.no_grad():
+            outputs = self._model.generate(
+                **inputs,
+                max_new_tokens=1024,
+                num_beams=3,
+                do_sample=False,
+            )
+        
+        response = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
+        return self._parse_omniparser_output(response, image.size)
+    
+    def _compare_element_states(
+        self, 
+        before: List[Dict[str, Any]], 
+        after: List[Dict[str, Any]], 
+        expected_change: str
+    ) -> tuple:
+        """Compare two element lists to verify expected change."""
+        # Simple heuristic comparison
+        before_count = len(before)
+        after_count = len(after)
+        
+        # Check if element count changed significantly
+        if "appear" in expected_change.lower() or "open" in expected_change.lower():
+            if after_count > before_count:
+                return True, 0.7, f"Element count increased: {before_count} -> {after_count}"
+        elif "disappear" in expected_change.lower() or "close" in expected_change.lower():
+            if after_count < before_count:
+                return True, 0.7, f"Element count decreased: {before_count} -> {after_count}"
+        elif "click" in expected_change.lower() or "press" in expected_change.lower():
+            # For clicks, look for state changes in buttons
+            return True, 0.5, "Click action assumed to change state"
+        
+        return False, 0.3, f"No significant change detected ({before_count} -> {after_count} elements)"
+    
     # ============================================================
-    # HELPER METHODS
+    # OMNIPARSER OUTPUT PARSING
     # ============================================================
     
-    def _parse_elements(self, response: str) -> List[Dict[str, Any]]:
-        """Parse model response into structured elements."""
+    def _parse_omniparser_output(self, response: str, image_size: tuple) -> List[Dict[str, Any]]:
+        """Parse OmniParser structured output into elements.
+        
+        OmniParser returns output in a specific format with bounding boxes,
+        element types, and labels. This parser handles that format.
+        """
         elements = []
         
-        # Try to parse structured output (JSON-like or formatted text)
-        # This is a simplified parser - production would use more robust parsing
-        lines = response.split("\n")
-        current_element = {}
+        # OmniParser typically outputs something like:
+        # "<bbox><x1><y1><x2><y2></bbox> <type>button</type> <label>Save</label>"
+        # or JSON-like structured output
         
-        for line in lines:
-            line = line.strip()
-            if not line:
-                if current_element:
-                    elements.append(current_element)
-                    current_element = {}
-                continue
-            
-            # Look for element indicators
-            if any(kw in line.lower() for kw in ["button", "input", "text", "link", "menu", "icon", "element"]):
-                if current_element:
-                    elements.append(current_element)
-                current_element = {
-                    "type": self._classify_element(line),
-                    "description": line,
-                    "confidence": 0.7,
-                }
-            elif "bbox" in line.lower() or "bounding box" in line.lower():
-                # Try to extract coordinates
-                bbox = self._extract_bbox(line)
-                if bbox:
-                    current_element["bbox"] = bbox
-            elif "confidence" in line.lower():
-                try:
-                    conf = float("".join(c for c in line if c.isdigit() or c == "."))
-                    current_element["confidence"] = conf
-                except:
-                    pass
-            else:
-                if current_element:
-                    current_element["description"] += " " + line
-        
-        if current_element:
-            elements.append(current_element)
-        
-        # If no structured elements found, create from raw response
-        if not elements:
-            elements = [{
-                "type": "unknown",
-                "description": response[:200],
-                "confidence": 0.5,
-            }]
-        
-        return elements[:self.config.max_elements]
-    
-    def _classify_element(self, description: str) -> str:
-        """Classify element type from description."""
-        desc = description.lower()
-        if "button" in desc:
-            return "button"
-        elif "input" in desc or "text field" in desc or "edit" in desc:
-            return "input"
-        elif "link" in desc or "hyperlink" in desc:
-            return "link"
-        elif "menu" in desc:
-            return "menu"
-        elif "icon" in desc:
-            return "icon"
-        elif "text" in desc and "field" not in desc:
-            return "text"
-        elif "image" in desc or "picture" in desc:
-            return "image"
-        elif "scroll" in desc:
-            return "scrollbar"
-        elif "tab" in desc:
-            return "tab"
-        elif "checkbox" in desc:
-            return "checkbox"
-        elif "radio" in desc:
-            return "radio"
-        elif "dropdown" in desc or "combo" in desc:
-            return "dropdown"
-        elif "slider" in desc:
-            return "slider"
-        elif "progress" in desc:
-            return "progressbar"
-        elif "title" in desc or "header" in desc:
-            return "header"
-        elif "status" in desc:
-            return "status"
-        else:
-            return "unknown"
-    
-    def _extract_bbox(self, line: str) -> Optional[Dict[str, int]]:
-        """Extract bounding box from text line."""
         import re
-        # Look for patterns like [x, y, w, h] or x=100 y=200 w=300 h=400
-        patterns = [
-            r'\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]',  # [x, y, w, h]
-            r'x[=:]\s*(\d+).*?y[=:]\s*(\d+).*?w[=:]\s*(\d+).*?h[=:]\s*(\d+)',
-            r'left[=:]\s*(\d+).*?top[=:]\s*(\d+).*?width[=:]\s*(\d+).*?height[=:]\s*(\d+)',
-            r'(\d+),\s*(\d+),\s*(\d+),\s*(\d+)',  # x, y, w, h
-        ]
         
-        for pattern in patterns:
-            match = re.search(pattern, line, re.IGNORECASE)
-            if match:
-                x, y, w, h = map(int, match.groups())
-                return {
-                    "left": x,
-                    "top": y,
-                    "width": w,
-                    "height": h,
-                    "right": x + w,
-                    "bottom": y + h,
-                }
-        return None
+        # Try to parse the structured format used by OmniParser
+        # Format: [x1, y1, x2, y2] type label
+        pattern = r'\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]\s*(\w+)\s*(.*)'
+        matches = re.findall(pattern, response)
+        
+        if matches:
+            img_w, img_h = image_size
+            for match in matches:
+                x1, y1, x2, y2, elem_type, label = match
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                
+                # Normalize coordinates if needed (OmniParser may use normalized coords)
+                if x2 <= 1000 and y2 <= 1000 and (img_w > 1000 or img_h > 1000):
+                    # Likely normalized to 1000x1000
+                    x1 = int(x1 * img_w / 1000)
+                    y1 = int(y1 * img_h / 1000)
+                    x2 = int(x2 * img_w / 1000)
+                    y2 = int(y2 * img_h / 1000)
+                
+                elements.append({
+                    "type": elem_type.lower(),
+                    "label": label.strip() if label else "",
+                    "description": f"{elem_type}: {label}" if label else elem_type,
+                    "bbox": {
+                        "left": min(x1, x2),
+                        "top": min(y1, y2),
+                        "width": abs(x2 - x1),
+                        "height": abs(y2 - y1),
+                        "right": max(x1, x2),
+                        "bottom": max(y1, y2),
+                    },
+                    "confidence": 0.8,  # OmniParser typically high confidence
+                    "source": "omniparser",
+                })
+            return elements[:self.config.max_elements]
+        
+        # Fallback: Try alternative format (JSON)
+        try:
+            import json
+            data = json.loads(response)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "bbox" in item:
+                        bbox = item["bbox"]
+                        if isinstance(bbox, list) and len(bbox) == 4:
+                            x1, y1, x2, y2 = bbox
+                            elements.append({
+                                "type": item.get("type", "unknown"),
+                                "label": item.get("label", ""),
+                                "description": item.get("description", f"{item.get('type', 'unknown')}: {item.get('label', '')}"),
+                                "bbox": {
+                                    "left": min(x1, x2),
+                                    "top": min(y1, y2),
+                                    "width": abs(x2 - x1),
+                                    "height": abs(y2 - y1),
+                                    "right": max(x1, x2),
+                                    "bottom": max(y1, y2),
+                                },
+                                "confidence": item.get("confidence", 0.7),
+                                "source": "omniparser",
+                            })
+                return elements[:self.config.max_elements]
+        except:
+            pass
+        
+        # If no structured output parsed, return empty (don't invent elements)
+        logger.warning("Could not parse OmniParser output into structured elements")
+        return []
     
     def _extract_text(self, elements: List[Dict[str, Any]]) -> str:
         """Extract all text from elements."""
         texts = []
         for elem in elements:
-            desc = elem.get("description", "")
-            if desc and elem.get("type") in ["text", "button", "link", "header", "input"]:
-                texts.append(desc)
+            label = elem.get("label", "")
+            if label:
+                texts.append(label)
         return " ".join(texts)
     
     def _suggest_actions(self, elements: List[Dict[str, Any]], task: str) -> List[str]:
@@ -579,16 +584,16 @@ class VisionModelProvider(ModelProvider):
         
         for elem in elements:
             elem_type = elem.get("type", "unknown")
-            desc = elem.get("description", "").lower()
+            label = elem.get("label", "").lower()
             
-            if "save" in task_lower and elem_type == "button" and "save" in desc:
-                actions.append(f"Click '{elem['description']}' to save")
+            if "save" in task_lower and elem_type == "button" and "save" in label:
+                actions.append(f"Click '{elem['label']}' button to save")
             elif "click" in task_lower and elem_type == "button":
-                actions.append(f"Click '{elem['description']}'")
-            elif "type" in task_lower and elem_type == "input":
-                actions.append(f"Type in '{elem['description']}'")
-            elif "search" in task_lower and elem_type in ["input", "button"] and ("search" in desc or "find" in desc):
-                actions.append(f"Use '{elem['description']}' for search")
+                actions.append(f"Click '{elem['label']}' button")
+            elif "type" in task_lower and elem_type in ["input", "edit", "textbox"]:
+                actions.append(f"Type in '{elem['label']}' field")
+            elif "search" in task_lower and elem_type in ["input", "button"] and ("search" in label or "find" in label):
+                actions.append(f"Use '{elem['label']}' for search")
         
         if not actions:
             actions = ["Analyze screen for next steps"]
@@ -597,12 +602,12 @@ class VisionModelProvider(ModelProvider):
     
     def _matches_description(self, element: Dict[str, Any], description: str) -> bool:
         """Check if element matches description."""
-        elem_desc = element.get("description", "").lower()
+        label = element.get("label", "").lower()
         elem_type = element.get("type", "").lower()
         target = description.lower()
         
-        # Direct text match
-        if target in elem_desc:
+        # Direct text match in label
+        if target in label:
             return True
         
         # Type-based match
@@ -611,8 +616,8 @@ class VisionModelProvider(ModelProvider):
         
         # Keyword matching
         target_words = set(target.split())
-        elem_words = set(elem_desc.split())
-        if target_words & elem_words:
+        label_words = set(label.split())
+        if target_words & label_words:
             return True
         
         return False

@@ -870,7 +870,7 @@ class MouseControlTool(BaseTool):
                 "scroll_amount": {"type": "integer", "default": 3, "description": "Scroll amount (positive up, negative down)"},
                 "drag_to_x": {"type": "integer", "description": "Drag destination X"},
                 "drag_to_y": {"type": "integer", "description": "Drag destination Y"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -899,13 +899,11 @@ class MouseControlTool(BaseTool):
         if not WIN32_AVAILABLE:
             return {"success": False, "error": "win32 not available", "error_code": "DEPENDENCY_MISSING"}
         
-        # Check approval for actions that modify state
         args = context.arguments
         action = args.get("action")
         
-        if action in ["click", "double_click", "right_click", "drag"]:
-            if not args.get("approved", False):
-                return {"success": False, "error": "Explicit approval required for mouse actions", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         try:
             if action == "position":
@@ -1039,7 +1037,7 @@ class KeyboardInputTool(BaseTool):
                 "key": {"type": "string", "description": "Key to press (e.g., 'enter', 'tab', 'escape', 'a')"},
                 "keys": {"type": "array", "items": {"type": "string"}, "description": "Keys for hotkey (e.g., ['ctrl', 'c'])"},
                 "interval": {"type": "number", "default": 0.05, "description": "Interval between keystrokes"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -1082,9 +1080,8 @@ class KeyboardInputTool(BaseTool):
         args = context.arguments
         action = args.get("action")
         
-        if action in ["press", "type", "hotkey"]:
-            if not args.get("approved", False):
-                return {"success": False, "error": "Explicit approval required for keyboard input", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         try:
             def key_down(vk):
@@ -1263,7 +1260,7 @@ class WindowInteractTool(BaseTool):
                 },
                 "text": {"type": "string", "description": "Text to type (for type action)"},
                 "value": {"type": "string", "description": "Value to select (for select action)"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -1391,10 +1388,8 @@ class WindowInteractTool(BaseTool):
         text = args.get("text", "")
         value = args.get("value", "")
         
-        # Check approval for modifying actions
-        if action in ["click", "type", "select", "set_focus"]:
-            if not args.get("approved", False):
-                return {"success": False, "error": "Explicit approval required for window interaction", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         # Connect to window
         window = self._connect_window(window_title, window_handle)

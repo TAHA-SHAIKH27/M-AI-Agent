@@ -6,13 +6,13 @@ Supports Chrome, Edge, Firefox, and WebKit.
 import asyncio
 import base64
 import json
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any
 
 import structlog
 
@@ -133,8 +133,6 @@ class PlaywrightBrowser:
                 "headless": self.headless,
                 "args": [
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process",
                 ],
             }
             
@@ -298,7 +296,37 @@ class PlaywrightBrowser:
             
             await locator.first.wait_for(state="visible", timeout=10000)
             
-            return await self.find_element(locator.first)
+            # Get element info directly from locator
+            element_id = str(uuid.uuid4())[:8]
+            bounding_box = await locator.first.bounding_box()
+            tag_name = await locator.first.evaluate("el => el.tagName.toLowerCase()")
+            text_content = await locator.first.text_content()
+            
+            # Get attributes
+            attributes = await locator.first.evaluate("""el => {
+                const attrs = {};
+                for (const attr of el.attributes) {
+                    attrs[attr.name] = attr.value;
+                }
+                return attrs;
+            }""")
+            
+            is_visible = await locator.first.is_visible()
+            is_enabled = await locator.first.is_enabled()
+            
+            return BrowserElement(
+                element_id=element_id,
+                selector=f"text='{text}'",
+                tag_name=tag_name,
+                text=text_content or "",
+                attributes=attributes,
+                bounding_box=bounding_box,
+                is_visible=is_visible,
+                is_enabled=is_enabled,
+                tag_type=self._classify_element(tag_name, attributes),
+                confidence=0.9,
+                found_by="text",
+            )
             
         except Exception as e:
             logger.debug(f"Element by text not found: {text} - {e}")
@@ -357,8 +385,9 @@ class PlaywrightBrowser:
         button: str = "left",
         click_count: int = 1,
         timeout: float = 10.0,
+        verify: bool = True,
     ) -> Dict[str, Any]:
-        """Click an element."""
+        """Click an element with optional postcondition verification."""
         try:
             if element:
                 locator = self._page.locator(element.selector)
@@ -367,7 +396,28 @@ class PlaywrightBrowser:
             else:
                 return {"success": False, "error": "No selector or element provided"}
             
+            # Get element info before click for verification
+            before_url = self._page.url
+            before_title = await self._page.title()
+            
             await locator.click(button=button, click_count=click_count, timeout=timeout * 1000)
+            
+            # Verify postcondition if requested
+            if verify:
+                await self._page.wait_for_load_state("networkidle", timeout=5000)
+                after_url = self._page.url
+                after_title = await self._page.title()
+                
+                return {
+                    "success": True, 
+                    "clicked": True,
+                    "verification": {
+                        "url_changed": before_url != after_url,
+                        "title_changed": before_title != after_title,
+                        "before_url": before_url,
+                        "after_url": after_url,
+                    }
+                }
             
             return {"success": True, "clicked": True}
             

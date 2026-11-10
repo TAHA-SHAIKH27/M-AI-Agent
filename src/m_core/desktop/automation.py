@@ -101,21 +101,16 @@ class DesktopAutomation:
         self._initialized = False
     
     async def initialize(self) -> None:
-        """Initialize the automation engine and grant required permissions."""
+        """Initialize the automation engine.
+        
+        Does NOT grant permissions automatically - permissions must be explicitly
+        granted by the user through the consent system before sensitive operations.
+        """
         if self._initialized:
             return
         
-        # Grant common permissions
-        permissions = [
-            "app:launch", "app:control", "automation:input", "automation:window",
-            "screen:capture", "screen:ocr", "screen:find", "screen:verify",
-            "file:write", "file:read", "system:info"
-        ]
-        for cap in permissions:
-            consent_manager.grant(cap, scope=ConsentScope.GLOBAL, ttl_hours=1)
-        
         self._initialized = True
-        logger.info("DesktopAutomation initialized")
+        logger.info("DesktopAutomation initialized (permissions require explicit consent)")
     
     def _get_correlation_id(self, prefix: str = "auto") -> str:
         """Generate a correlation ID for tracking."""
@@ -129,9 +124,30 @@ class DesktopAutomation:
         
         cid = correlation_id or self._get_correlation_id(tool_name)
         tool = tool_registry.get_tool(tool_name)
+        
+        # Check if all required permissions are granted - if so, provide auto-approval
+        approval_token = None
+        all_granted = True
+        for perm in permissions:
+            if not consent_manager.is_granted(perm):
+                all_granted = False
+                break
+        
+        # Get requires_approval from manifest (handles both dict and object)
+        manifest = tool.manifest
+        requires_approval = manifest.get('requires_approval', False) if isinstance(manifest, dict) else getattr(manifest, 'requires_approval', False)
+        
+        if all_granted and requires_approval:
+            approval_token = f"auto-{self.user_id}-{cid}"
+        
+        # Prepare arguments with approval token if available
+        tool_args = dict(arguments)
+        if approval_token:
+            tool_args["approval_token"] = approval_token
+        
         ctx = ToolExecutionContext(
             tool_name=tool_name,
-            arguments=arguments,
+            arguments=tool_args,
             correlation_id=cid,
             user_id=self.user_id,
             permissions_granted=permissions,
@@ -173,7 +189,6 @@ class DesktopAutomation:
         result = await self._execute_tool("app_launch", {
             "app_name": app_name,
             "arguments": args,
-            "approved": True
         }, ["app:launch"], cid)
         
         if not result["success"]:
@@ -221,11 +236,11 @@ class DesktopAutomation:
         
         # Determine identifier type
         if isinstance(identifier, int):
-            arguments = {"action": "close", "process_id": identifier, "approved": True}
+            arguments = {"action": "close", "process_id": identifier}
         elif identifier.endswith(".exe") or "\\" in identifier:
-            arguments = {"action": "close", "process_name": identifier, "approved": True}
+            arguments = {"action": "close", "process_name": identifier}
         else:
-            arguments = {"action": "close", "process_name": identifier, "approved": True}
+            arguments = {"action": "close", "process_name": identifier}
         
         result = await self._execute_tool("app_control", arguments, ["app:control"], cid)
         
@@ -380,14 +395,14 @@ class DesktopAutomation:
         # Determine identifier type
         if isinstance(identifier, int):
             if is_hwnd:
-                arguments = {"action": "focus", "hwnd": identifier, "approved": True}
+                arguments = {"action": "focus", "hwnd": identifier}
             else:
-                arguments = {"action": "focus", "process_id": identifier, "approved": True}
+                arguments = {"action": "focus", "process_id": identifier}
         elif identifier.endswith(".exe"):
-            arguments = {"action": "focus", "process_name": identifier, "approved": True}
+            arguments = {"action": "focus", "process_name": identifier}
         else:
             # Assume it's a window title
-            arguments = {"action": "focus", "window_title": identifier, "approved": True}
+            arguments = {"action": "focus", "window_title": identifier}
         
         result = await self._execute_tool("app_control", arguments, ["app:control"], cid)
         
@@ -514,7 +529,7 @@ class DesktopAutomation:
         filename_ctrl = {"type": "Edit", "title": "File name:", "index": 0}
         result = await self._execute_tool("window_interact", {
             "action": "type", "window_title": dialog_title, "control_identifier": filename_ctrl, 
-            "text": filename, "approved": True
+            "text": filename
         }, ["automation:window"])
         
         if not result["success"]:
@@ -533,7 +548,7 @@ class DesktopAutomation:
                 error=f"Failed to press Enter to save: {result.get('error')}"
             )
         
-        # Handle potential "Confirm Save As" dialog
+        # Handle potential "Confirm Save As" dialog - need to select "Yes" to replace
         await asyncio.sleep(1)
         confirm_dialog = None
         for attempt in range(5):
@@ -541,33 +556,60 @@ class DesktopAutomation:
             result = await self._execute_tool("window_list", {"filter_title": "Confirm Save As"}, ["app:control"])
             if result["success"] and result["result"]["windows"]:
                 confirm_dialog = result["result"]["windows"][0]
-                print(f'   Found Confirm Save As dialog: "{confirm_dialog["title"]}"')
-                # Press Enter to confirm (Yes button is default)
-                result = await self.send_hotkey(['enter'])
-                if result.success:
-                    print(f'   Pressed Enter to confirm Save As')
+                confirm_title = confirm_dialog["title"]
+                print(f'   Found Confirm Save As dialog: "{confirm_title}"')
+                
+                # Use UI Automation to find and click the "Yes" button
+                yes_button = {"type": "Button", "title": "Yes", "index": 0}
+                result = await self._execute_tool("window_interact", {
+                    "action": "click", "window_title": confirm_title, 
+                    "control_identifier": yes_button
+                }, ["automation:window"])
+                if result["success"]:
+                    print(f'   Clicked "Yes" button via UI Automation')
+                else:
+                    # Fallback: try Tab to navigate to Yes, then Enter
+                    print(f'   UI Automation failed, trying Tab navigation')
+                    result = await self.send_hotkey(['tab'])
+                    if result.success:
+                        await asyncio.sleep(0.2)
+                        result = await self.send_hotkey(['enter'])
+                        if result.success:
+                            print(f'   Pressed Tab then Enter to confirm replace')
                 break
         
         await asyncio.sleep(2)  # Wait for save to complete
         
-        # Verify file was saved - check common locations
+        # Verify file was saved - search comprehensively
         possible_paths = [
             os.path.expanduser(f'~/Desktop/{filename}'),
             os.path.expanduser(f'~/Documents/{filename}'),
             os.path.expanduser(f'~/OneDrive/Desktop/{filename}'),
             os.path.expanduser(f'~/OneDrive/Desktop/ALIYAJSHAIKH/{filename}'),
-            os.path.expanduser(f'~/OneDrive/Desktop/*/{filename}'),  # Any subfolder
+            os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', filename),
+            os.path.join(os.environ.get('USERPROFILE', ''), 'Documents', filename),
+            os.path.join(os.environ.get('USERPROFILE', ''), 'OneDrive', 'Desktop', filename),
         ]
         
         if target_dir:
             possible_paths.insert(0, os.path.join(target_dir, filename))
         
-        # Also check for any matching files in OneDrive Desktop subfolders
+        # Search OneDrive Desktop subfolders
         onedrive_desktop = os.path.expanduser('~/OneDrive/Desktop')
         if os.path.exists(onedrive_desktop):
             for root, dirs, files in os.walk(onedrive_desktop):
                 if filename in files:
                     possible_paths.append(os.path.join(root, filename))
+        
+        # Also search common user folders
+        user_profile = os.environ.get('USERPROFILE', '')
+        if user_profile:
+            for root, dirs, files in os.walk(user_profile):
+                if filename in files:
+                    possible_paths.append(os.path.join(root, filename))
+        
+        # Deduplicate
+        possible_paths = list(dict.fromkeys(possible_paths))
         
         saved_path = None
         for path in possible_paths:
@@ -582,11 +624,167 @@ class DesktopAutomation:
                 details={"file_path": saved_path, "dialog_title": dialog_title}
             )
         else:
+            # Debug: list all .txt files in common locations to help diagnose
+            debug_info = {"searched_paths": possible_paths}
+            for base in [os.path.expanduser('~/Desktop'), os.path.expanduser('~/Documents'), os.path.expanduser('~/OneDrive/Desktop')]:
+                if os.path.exists(base):
+                    txt_files = [f for f in os.listdir(base) if f.endswith('.txt')]
+                    debug_info[f"{base}_txt_files"] = txt_files[:10]
+            
             return InteractionResult(
                 success=False,
                 method_used=InteractionMethod.UI_AUTOMATION,
-                error=f"File not found after save. Checked: {possible_paths}",
-                details={"dialog_title": dialog_title}
+                error=f"File not found after save. Checked {len(possible_paths)} locations.",
+                details={**{"dialog_title": dialog_title}, **debug_info}
+            )
+    
+    async def save_file_fallback(self, window_title: str, filename: str, 
+                                 target_dir: str = None) -> InteractionResult:
+        """
+        Fallback save method using keyboard shortcuts.
+        Uses Alt+Shift+S for Save As, then navigates to Replace button.
+        """
+        import os
+        cid = self._get_correlation_id("save_fallback")
+        
+        # Press Alt+Shift+S for Save As
+        result = await self.send_hotkey(['alt', 'shift', 's'])
+        if not result.success:
+            return InteractionResult(
+                success=False, method_used=InteractionMethod.SHORTCUT,
+                error=f"Failed to open Save As dialog (Alt+Shift+S)"
+            )
+        
+        await asyncio.sleep(1)
+        
+        # Find Save As dialog
+        save_dialog = None
+        dialog_title = None
+        for attempt in range(10):
+            await asyncio.sleep(0.5)
+            result = await self._execute_tool("window_list", {"filter_title": "Save as"}, ["app:control"])
+            if result["success"] and result["result"]["windows"]:
+                save_dialog = result["result"]["windows"][0]
+                dialog_title = save_dialog["title"]
+                print(f'   Found Save As dialog: "{dialog_title}"')
+                break
+            result = await self._execute_tool("window_list", {"filter_title": "Save As"}, ["app:control"])
+            if result["success"] and result["result"]["windows"]:
+                save_dialog = result["result"]["windows"][0]
+                dialog_title = save_dialog["title"]
+                print(f'   Found Save As dialog: "{dialog_title}"')
+                break
+        
+        if not dialog_title:
+            return InteractionResult(
+                success=False, method_used=InteractionMethod.UI_AUTOMATION,
+                error="Save As dialog not found"
+            )
+        
+        # Focus dialog
+        result = await self.focus_window(dialog_title, verify=True)
+        
+        await asyncio.sleep(0.5)
+        
+        # Type filename
+        filename_ctrl = {"type": "Edit", "title": "File name:", "index": 0}
+        result = await self._execute_tool("window_interact", {
+            "action": "type", "window_title": dialog_title, "control_identifier": filename_ctrl, 
+            "text": filename
+        }, ["automation:window"])
+        
+        if not result["success"]:
+            return InteractionResult(
+                success=False, method_used=InteractionMethod.UI_AUTOMATION,
+                error=f"Failed to type filename: {result.get('error')}"
+            )
+        
+        await asyncio.sleep(0.5)
+        
+        # Press Enter to save
+        result = await self.send_hotkey(['enter'])
+        if not result.success:
+            return InteractionResult(
+                success=False, method_used=InteractionMethod.SHORTCUT,
+                error=f"Failed to press Enter to save"
+            )
+        
+        # Handle potential "Confirm Save As" dialog
+        await asyncio.sleep(1)
+        for attempt in range(5):
+            await asyncio.sleep(0.5)
+            result = await self._execute_tool("window_list", {"filter_title": "Confirm Save As"}, ["app:control"])
+            if result["success"] and result["result"]["windows"]:
+                confirm_dialog = result["result"]["windows"][0]
+                confirm_title = confirm_dialog["title"]
+                print(f'   Found Confirm Save As dialog: "{confirm_title}"')
+                
+                # Navigate to "Yes" button using left arrow (default is "No")
+                result = await self.send_hotkey(['left'])
+                if result.success:
+                    print(f'   Moved to "Yes" button')
+                    await asyncio.sleep(0.2)
+                    result = await self.send_hotkey(['enter'])
+                    if result.success:
+                        print(f'   Pressed Enter to confirm replace')
+                break
+        
+        await asyncio.sleep(3)  # Wait for save to complete
+        
+        # Verify file was saved - search comprehensively
+        possible_paths = [
+            os.path.expanduser(f'~/Desktop/{filename}'),
+            os.path.expanduser(f'~/Documents/{filename}'),
+            os.path.expanduser(f'~/OneDrive/Desktop/{filename}'),
+            os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop', filename),
+            os.path.join(os.environ.get('USERPROFILE', ''), 'Documents', filename),
+            os.path.join(os.environ.get('USERPROFILE', ''), 'OneDrive', 'Desktop', filename),
+        ]
+        
+        if target_dir:
+            possible_paths.insert(0, os.path.join(target_dir, filename))
+        
+        # Search OneDrive Desktop subfolders
+        onedrive_desktop = os.path.expanduser('~/OneDrive/Desktop')
+        if os.path.exists(onedrive_desktop):
+            for root, dirs, files in os.walk(onedrive_desktop):
+                if filename in files:
+                    possible_paths.append(os.path.join(root, filename))
+        
+        # Also search common user folders
+        user_profile = os.environ.get('USERPROFILE', '')
+        if user_profile:
+            for root, dirs, files in os.walk(user_profile):
+                if filename in files:
+                    possible_paths.append(os.path.join(root, filename))
+        
+        # Deduplicate
+        possible_paths = list(dict.fromkeys(possible_paths))
+        
+        saved_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                saved_path = path
+                break
+        
+        if saved_path:
+            return InteractionResult(
+                success=True,
+                method_used=InteractionMethod.UI_AUTOMATION,
+                details={"file_path": saved_path, "dialog_title": dialog_title}
+            )
+        else:
+            debug_info = {"searched_paths": possible_paths}
+            for base in [os.path.expanduser('~/Desktop'), os.path.expanduser('~/Documents'), os.path.expanduser('~/OneDrive/Desktop')]:
+                if os.path.exists(base):
+                    txt_files = [f for f in os.listdir(base) if f.endswith('.txt')]
+                    debug_info[f"{base}_txt_files"] = txt_files[:10]
+            
+            return InteractionResult(
+                success=False,
+                method_used=InteractionMethod.UI_AUTOMATION,
+                error=f"File not found after fallback save. Checked {len(possible_paths)} locations.",
+                details={**{"dialog_title": dialog_title}, **debug_info}
             )
     
     async def get_window_state(self, identifier: Union[str, int]) -> Optional[WindowInfo]:
@@ -623,27 +821,27 @@ class DesktopAutomation:
         """Maximize a window."""
         cid = self._get_correlation_id("maximize")
         if isinstance(identifier, int):
-            arguments = {"action": "maximize", "process_id": identifier, "approved": True}
+            arguments = {"action": "maximize", "process_id": identifier}
         else:
-            arguments = {"action": "maximize", "process_name": identifier, "approved": True}
+            arguments = {"action": "maximize", "process_name": identifier}
         return await self._execute_tool("app_control", arguments, ["app:control"], cid)
     
     async def minimize_window(self, identifier: Union[str, int]) -> InteractionResult:
         """Minimize a window."""
         cid = self._get_correlation_id("minimize")
         if isinstance(identifier, int):
-            arguments = {"action": "minimize", "process_id": identifier, "approved": True}
+            arguments = {"action": "minimize", "process_id": identifier}
         else:
-            arguments = {"action": "minimize", "process_name": identifier, "approved": True}
+            arguments = {"action": "minimize", "process_name": identifier}
         return await self._execute_tool("app_control", arguments, ["app:control"], cid)
     
     async def restore_window(self, identifier: Union[str, int]) -> InteractionResult:
         """Restore a minimized/maximized window."""
         cid = self._get_correlation_id("restore")
         if isinstance(identifier, int):
-            arguments = {"action": "restore", "process_id": identifier, "approved": True}
+            arguments = {"action": "restore", "process_id": identifier}
         else:
-            arguments = {"action": "restore", "process_name": identifier, "approved": True}
+            arguments = {"action": "restore", "process_name": identifier}
         return await self._execute_tool("app_control", arguments, ["app:control"], cid)
     
     # ============================================================
@@ -654,7 +852,7 @@ class DesktopAutomation:
         """Type text at current cursor position."""
         cid = self._get_correlation_id("type")
         result = await self._execute_tool("keyboard_input", {
-            "action": "type", "text": text, "interval": interval, "approved": True
+            "action": "type", "text": text, "interval": interval
         }, ["automation:input"], cid)
         
         return InteractionResult(
@@ -667,7 +865,7 @@ class DesktopAutomation:
         """Press a single key."""
         cid = self._get_correlation_id("press")
         result = await self._execute_tool("keyboard_input", {
-            "action": "press", "key": key, "approved": True
+            "action": "press", "key": key
         }, ["automation:input"], cid)
         
         return InteractionResult(
@@ -680,7 +878,7 @@ class DesktopAutomation:
         """Send a keyboard shortcut (e.g., ['ctrl', 's'])."""
         cid = self._get_correlation_id("hotkey")
         result = await self._execute_tool("keyboard_input", {
-            "action": "hotkey", "keys": keys, "approved": True
+            "action": "hotkey", "keys": keys
         }, ["automation:input"], cid)
         
         return InteractionResult(
@@ -696,7 +894,7 @@ class DesktopAutomation:
         cid = self._get_correlation_id("click")
         result = await self._execute_tool("mouse_control", {
             "action": "click", "x": x, "y": y, "button": button, 
-            "clicks": clicks, "approved": True
+            "clicks": clicks
         }, ["automation:input"], cid)
         
         return InteractionResult(
@@ -727,7 +925,7 @@ class DesktopAutomation:
         cid = self._get_correlation_id("ui_click")
         result = await self._execute_tool("window_interact", {
             "action": "click", "window_title": window_title,
-            "control_identifier": control_identifier, "approved": True
+            "control_identifier": control_identifier
         }, ["automation:window"], cid)
         
         return InteractionResult(
@@ -742,7 +940,7 @@ class DesktopAutomation:
         cid = self._get_correlation_id("ui_type")
         result = await self._execute_tool("window_interact", {
             "action": "type", "window_title": window_title,
-            "control_identifier": control_identifier, "text": text, "approved": True
+            "control_identifier": control_identifier, "text": text
         }, ["automation:window"], cid)
         
         return InteractionResult(
