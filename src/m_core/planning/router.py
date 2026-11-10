@@ -10,7 +10,7 @@ from ..model_providers.base import ModelProvider
 from ..agents import agent_registry
 from ..agents.schemas import AgentManifest, AgentCapability
 from ..tools import tool_registry
-from ..tools.schemas import ToolManifest, ToolRiskLevel
+from m_core.common_schemas import ToolManifest, ToolRiskLevel
 from ..security import consent_manager
 from ..security.consent import Capability
 from ..core.events import event_bus

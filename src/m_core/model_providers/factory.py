@@ -9,6 +9,7 @@ from .ollama import OllamaProvider
 from .lm_studio import LMStudioProvider
 from .openai_provider import OpenAIProvider
 from .anthropic import AnthropicProvider
+from .vision_provider import VisionModelProvider, VisionConfig
 from ..config import settings
 from ..core.exceptions import ProviderError
 from ..utils.logging import get_logger
@@ -21,6 +22,7 @@ class ProviderFactory:
     
     def __init__(self):
         self._providers: List[ModelProvider] = []
+        self._vision_provider: Optional[VisionModelProvider] = None
         self._initialize_providers()
     
     def _initialize_providers(self) -> None:
@@ -37,7 +39,14 @@ class ProviderFactory:
         except Exception as e:
             logger.warning(f"Failed to initialize Nemotron provider: {e}")
         
-        # 2. Fallback: Ollama (local)
+        # 2. Vision Provider (for GUI understanding)
+        try:
+            self._vision_provider = VisionModelProvider()
+            logger.info("Registered Vision Provider for GUI understanding")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Vision provider: {e}")
+        
+        # 3. Fallback: Ollama (local)
         try:
             ollama = OllamaProvider()
             self._providers.append(ollama)
@@ -45,7 +54,7 @@ class ProviderFactory:
         except Exception as e:
             logger.warning(f"Failed to initialize Ollama provider: {e}")
         
-        # 3. Fallback: LM Studio (local)
+        # 4. Fallback: LM Studio (local)
         try:
             lm_studio = LMStudioProvider()
             self._providers.append(lm_studio)
@@ -53,7 +62,7 @@ class ProviderFactory:
         except Exception as e:
             logger.warning(f"Failed to initialize LM Studio provider: {e}")
         
-        # 4. Fallback: OpenAI (cloud)
+        # 5. Fallback: OpenAI (cloud)
         try:
             if settings.openai_api_key:
                 openai = OpenAIProvider()
@@ -62,7 +71,7 @@ class ProviderFactory:
         except Exception as e:
             logger.warning(f"Failed to initialize OpenAI provider: {e}")
         
-        # 5. Fallback: Anthropic (cloud)
+        # 6. Fallback: Anthropic (cloud)
         try:
             if settings.anthropic_api_key:
                 anthropic = AnthropicProvider()
@@ -79,10 +88,24 @@ class ProviderFactory:
         return self._providers[0] if self._providers else None
     
     def get_provider(self, provider_id: str) -> Optional[ModelProvider]:
-        return next((p for p in self._providers if p.id == provider_id), None)
+        # Check chat providers first
+        provider = next((p for p in self._providers if p.id == provider_id), None)
+        if provider:
+            return provider
+        # Check vision provider
+        if self._vision_provider and self._vision_provider.id == provider_id:
+            return self._vision_provider
+        return None
+    
+    def get_vision_provider(self) -> Optional[VisionModelProvider]:
+        """Get the vision provider for GUI understanding."""
+        return self._vision_provider
     
     def get_all_providers(self) -> List[ModelProvider]:
-        return self._providers.copy()
+        all_providers = self._providers.copy()
+        if self._vision_provider:
+            all_providers.append(self._vision_provider)
+        return all_providers
     
     async def complete_with_fallback(self, request: CompletionRequest) -> CompletionResponse:
         """Try providers in order until one succeeds."""
@@ -135,6 +158,25 @@ class ProviderFactory:
                     "error": str(e),
                     "name": provider.name,
                     "type": provider.type,
+                }
+        # Also check vision provider
+        if self._vision_provider:
+            try:
+                health = await self._vision_provider.health_check_cached(ttl_seconds=30.0)
+                results[self._vision_provider.id] = {
+                    "healthy": health.healthy,
+                    "latency_ms": health.latency_ms,
+                    "error": health.error,
+                    "model_count": health.model_count,
+                    "name": self._vision_provider.name,
+                    "type": self._vision_provider.type,
+                }
+            except Exception as e:
+                results[self._vision_provider.id] = {
+                    "healthy": False,
+                    "error": str(e),
+                    "name": self._vision_provider.name,
+                    "type": self._vision_provider.type,
                 }
         return results
     

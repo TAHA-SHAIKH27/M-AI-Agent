@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from ..agents import agent_registry
 from ..tools import tool_registry
-from ..tools.schemas import ToolInvocation, ToolResult
+from m_core.common_schemas import ToolInvocation, ToolResult
 from ..model_providers import provider_factory
 from ..model_providers.schemas import (
     CompletionRequest, ChatMessage, MessageRole,

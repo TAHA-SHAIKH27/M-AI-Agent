@@ -1,7 +1,7 @@
 """
 M Desktop Automation Package
 
-Universal Windows desktop automation engine.
+Universal Windows desktop automation engine with Blueprint intelligence.
 """
 
 from .automation import (
@@ -14,6 +14,17 @@ from .automation import (
     create_automation
 )
 
+from .blueprint import (
+    BlueprintManager,
+    BlueprintStore,
+    ApplicationBlueprint,
+    BlueprintElement,
+    BlueprintAction,
+    BlueprintStatus,
+    ElementType,
+    create_blueprint_manager
+)
+
 __all__ = [
     "DesktopAutomation",
     "ApplicationInfo", 
@@ -21,5 +32,13 @@ __all__ = [
     "InteractionResult",
     "ApplicationState",
     "InteractionMethod",
-    "create_automation"
+    "create_automation",
+    "BlueprintManager",
+    "BlueprintStore",
+    "ApplicationBlueprint",
+    "BlueprintElement",
+    "BlueprintAction",
+    "BlueprintStatus",
+    "ElementType",
+    "create_blueprint_manager"
 ]

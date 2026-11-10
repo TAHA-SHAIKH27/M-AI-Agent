@@ -70,12 +70,12 @@ class ExecutionOrchestrator:
             return
         
         from .scheduler import TaskScheduler
-        from .state_manager import ExecutionStateManager
+        from .state_manager import state_manager as default_state_manager
         from .recovery import FailureRecoveryManager
         from .evaluator import ResultEvaluator
         
         self._scheduler = self._scheduler or TaskScheduler()
-        self._state_manager = self._state_manager or ExecutionStateManager()
+        self._state_manager = self._state_manager or default_state_manager
         self._recovery_manager = self._recovery_manager or FailureRecoveryManager()
         self._evaluator = self._evaluator or ResultEvaluator()
         
@@ -160,6 +160,9 @@ class ExecutionOrchestrator:
                 execution_record.status = TaskExecutionStatus.AWAITING_APPROVAL
                 execution_record.completed_at = int(datetime.now().timestamp() * 1000)
                 
+                # Populate execution_record with subtask records for visibility
+                execution_record.subtask_records = list(subtask_records.values())
+                
                 # Save state
                 orch_context = OrchestrationContext(
                     task_id=task_id,
@@ -172,6 +175,9 @@ class ExecutionOrchestrator:
                 )
                 self._active_tasks[task_id] = orch_context
                 await self._state_manager.save_execution_state(orch_context)
+                
+                # Create initial checkpoint for awaiting_approval state
+                await self._create_checkpoint(orch_context, CheckpointType.PRE_EXECUTION)
                 
                 # Publish awaiting approval event
                 await event_bus.publish_sync(
@@ -304,7 +310,11 @@ class ExecutionOrchestrator:
             raise
             
         finally:
-            self._active_tasks.pop(task_id, None)
+            # Only remove from active_tasks if not awaiting approval (which needs to stay for approval handling)
+            if task_id in self._active_tasks:
+                context = self._active_tasks[task_id]
+                if context.execution_record.status != TaskExecutionStatus.AWAITING_APPROVAL:
+                    self._active_tasks.pop(task_id, None)
     
     async def _execute_plan(
         self,
@@ -494,15 +504,21 @@ class ExecutionOrchestrator:
         """Process user approval or denial for a task/subtask."""
         context = self._active_tasks.get(task_id)
         if not context:
+            # Try to load from persisted state
             record = await self._state_manager.get_execution_record(task_id)
             if not record:
                 return False
+            
             if not approved:
                 record.status = TaskExecutionStatus.FAILED
                 record.error = f"Approval denied: {reason or 'User denied action'}"
                 record.completed_at = int(datetime.now().timestamp() * 1000)
                 await self._state_manager.save_execution_record(record)
                 return True
+            
+            # For approval, we need to reconstruct the context and resume execution
+            # Load the full orchestration context from state
+            # For now, return False - full resume would require reconstructing from checkpoint
             return False
         
         subtasks = context.execution_plan.subtasks
@@ -513,33 +529,85 @@ class ExecutionOrchestrator:
         if not targets:
             return False
         
-        for st in targets:
-            if approved:
-                st.approval_status = ApprovalStatus.GRANTED
-                audit_logger.log_consent(
-                    capability=f"subtask:{st.id}",
-                    granted=True,
-                    scope="task",
-                    task_id=task_id,
-                )
+        # Update subtasks in execution_plan (Subtask is frozen, so create new instances)
+        updated_subtasks = []
+        for st in context.execution_plan.subtasks:
+            if st in targets:
+                if approved:
+                    updated_subtasks.append(Subtask(
+                        id=st.id,
+                        name=st.name,
+                        description=st.description,
+                        task_type=st.task_type,
+                        assigned_agent=st.assigned_agent,
+                        assigned_tool=st.assigned_tool,
+                        dependencies=st.dependencies,
+                        priority=st.priority,
+                        estimated_duration_seconds=st.estimated_duration_seconds,
+                        max_retries=st.max_retries,
+                        timeout_seconds=st.timeout_seconds,
+                        requires_approval=st.requires_approval,
+                        approval_status=ApprovalStatus.GRANTED,
+                        metadata=st.metadata,
+                    ))
+                    audit_logger.log_consent(
+                        capability=f"subtask:{st.id}",
+                        granted=True,
+                        scope="task",
+                        task_id=task_id,
+                    )
+                else:
+                    updated_subtasks.append(Subtask(
+                        id=st.id,
+                        name=st.name,
+                        description=st.description,
+                        task_type=st.task_type,
+                        assigned_agent=st.assigned_agent,
+                        assigned_tool=st.assigned_tool,
+                        dependencies=st.dependencies,
+                        priority=st.priority,
+                        estimated_duration_seconds=st.estimated_duration_seconds,
+                        max_retries=st.max_retries,
+                        timeout_seconds=st.timeout_seconds,
+                        requires_approval=st.requires_approval,
+                        approval_status=ApprovalStatus.DENIED,
+                        metadata=st.metadata,
+                    ))
+                    if st.id in context.subtask_records:
+                        context.subtask_records[st.id].status = SubtaskExecutionStatus.FAILED
+                        context.subtask_records[st.id].error = f"Approval denied: {reason or 'User denied action'}"
+                    audit_logger.log_consent(
+                        capability=f"subtask:{st.id}",
+                        granted=False,
+                        scope="task",
+                        task_id=task_id,
+                        reason=reason,
+                    )
             else:
-                st.approval_status = ApprovalStatus.DENIED
-                if st.id in context.subtask_records:
-                    context.subtask_records[st.id].status = SubtaskExecutionStatus.FAILED
-                    context.subtask_records[st.id].error = f"Approval denied: {reason or 'User denied action'}"
-                audit_logger.log_consent(
-                    capability=f"subtask:{st.id}",
-                    granted=False,
-                    scope="task",
-                    task_id=task_id,
-                    reason=reason,
-                )
+                updated_subtasks.append(st)
+        
+        # Replace subtasks in execution_plan (ExecutionPlan is also frozen)
+        context.execution_plan = ExecutionPlan(
+            task_id=context.execution_plan.task_id,
+            original_request=context.execution_plan.original_request,
+            analysis=context.execution_plan.analysis,
+            subtasks=updated_subtasks,
+            strategy=context.execution_plan.strategy,
+            max_concurrency=context.execution_plan.max_concurrency,
+            total_estimated_duration=context.execution_plan.total_estimated_duration,
+            created_at=context.execution_plan.created_at,
+            metadata=context.execution_plan.metadata,
+        )
+        
+        subtasks = updated_subtasks
         
         if approved:
             still_pending = any(s.requires_approval and s.approval_status == ApprovalStatus.PENDING for s in subtasks)
             if not still_pending:
                 context.execution_record.status = TaskExecutionStatus.RUNNING
                 context.pause_event.set()
+                # Resume execution in background
+                asyncio.create_task(self._resume_execution(context))
         else:
             context.execution_record.status = TaskExecutionStatus.FAILED
             context.execution_record.error = f"Action denied: {reason or 'User denied action'}"
@@ -554,6 +622,77 @@ class ExecutionOrchestrator:
         
         await self._state_manager.save_execution_state(context)
         return True
+    
+    async def _resume_execution(self, context: OrchestrationContext) -> None:
+        """Resume task execution after approval is granted."""
+        correlation_id = str(uuid.uuid4())
+        try:
+            # Execute the plan
+            await self._execute_plan(context, correlation_id)
+            
+            # Final evaluation
+            evaluation = await self._evaluator.evaluate_task(context)
+            
+            # Update final status
+            context.execution_record.status = self._evaluation_to_status(evaluation.overall_result)
+            context.execution_record.result = evaluation.consolidated_result
+            context.execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+            
+            # Save final state
+            await self._state_manager.save_execution_state(context)
+            
+            # Create final checkpoint
+            await self._create_checkpoint(context, CheckpointType.POST_EXECUTION)
+            
+            # Publish completion event
+            await event_bus.publish_sync(
+                "task.completed" if evaluation.overall_result == EvaluationResult.SUCCESS else "task.failed",
+                "orchestrator",
+                {
+                    "task_id": context.task_id,
+                    "result": evaluation.overall_result.value,
+                    "execution_time_ms": evaluation.execution_time_ms,
+                },
+                correlation_id=correlation_id
+            )
+            
+            # Log audit
+            audit_logger.log(
+                event_type=AuditEventType.AGENT_COMPLETED if evaluation.overall_result == EvaluationResult.SUCCESS else AuditEventType.AGENT_FAILED,
+                resource=context.task_id,
+                action="execute_task",
+                result="success" if evaluation.overall_result == EvaluationResult.SUCCESS else "failure",
+                details={"evaluation": evaluation.overall_result.value},
+                correlation_id=correlation_id,
+            )
+            
+        except asyncio.CancelledError:
+            context.execution_record.status = TaskExecutionStatus.CANCELLED
+            context.execution_record.error = "Task cancelled"
+            context.execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+            await self._state_manager.save_execution_state(context)
+            await event_bus.publish_sync(
+                "task.cancelled",
+                "orchestrator",
+                {"task_id": context.task_id},
+                correlation_id=correlation_id
+            )
+        except Exception as e:
+            logger.error(f"Task execution failed: {e}")
+            context.execution_record.status = TaskExecutionStatus.FAILED
+            context.execution_record.error = str(e)
+            context.execution_record.error_code = type(e).__name__
+            context.execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+            await self._state_manager.save_execution_state(context)
+            await event_bus.publish_sync(
+                "task.failed",
+                "orchestrator",
+                {"task_id": context.task_id, "error": str(e)},
+                correlation_id=correlation_id
+            )
+        finally:
+            # Clean up active task
+            self._active_tasks.pop(context.task_id, None)
     
     async def get_task_status(self, task_id: str) -> Optional[TaskExecutionRecord]:
         """Get status of a task."""

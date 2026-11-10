@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List, Type
 from dataclasses import dataclass
 
-from .schemas import (
+from m_core.common_schemas import (
     ToolManifest,
     ToolInvocation,
     ToolResult,

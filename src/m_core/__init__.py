@@ -9,6 +9,8 @@ from .memory import *
 from .planning import *
 from .orchestration import *
 from .api import *
+from .desktop import *
+from .web import *
 
 __version__ = "0.1.0-dev"
 __all__ = ["settings"]

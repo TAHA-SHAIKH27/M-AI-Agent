@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from enum import Enum
 
 from m_core.tools import tool_registry
-from m_core.tools.schemas import ToolExecutionContext
+from m_core.common_schemas import ToolExecutionContext
 from m_core.security import consent_manager, ConsentScope
 
 logger = logging.getLogger(__name__)
@@ -267,7 +267,7 @@ class DesktopAutomation:
         
         # Verify all closed
         from m_core.tools import tool_registry
-        from m_core.tools.schemas import ToolExecutionContext
+        from m_core.common_schemas import ToolExecutionContext
         tool = tool_registry.get_tool('window_list')
         ctx = ToolExecutionContext(
             tool_name='window_list', arguments={'filter_process': process_name.replace('.exe', '')},

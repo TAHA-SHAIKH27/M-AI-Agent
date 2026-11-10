@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Dict, Any, Optional
 
 from m_core.tools import tool_registry
-from m_core.tools.schemas import ToolRiskLevel, ToolCategory
+from m_core.common_schemas import ToolRiskLevel, ToolCategory
 from m_core.security import consent_manager
 
 from ..schemas import ToolsResponse, ToolInfo, ErrorResponse

@@ -48,15 +48,30 @@ Return a JSON object with these fields:
   "requires_approval": false
 }
 
-Intent categories: question_answering, information_retrieval, file_operation, system_control, web_search, code_generation, data_analysis, planning, automation, creative_writing, conversation, other
+Intent categories: question_answering, information_retrieval, file_operation, system_control, web_search, code_generation, data_analysis, planning, automation, creative_writing, conversation, other, desktop_automation, browser_automation
 
-Entity types: file_path, url, date_time, person, organization, location, code_snippet, search_query, command, setting, other
+Entity types: file_path, url, date_time, person, organization, location, code_snippet, search_query, command, setting, other, application_name, window_title, ui_element
 
 Capabilities: model:chat, model:tools, file:read, file:write, file:list, file:search, file:delete, web:search, web:browse, web:automate, web:download, system:info, system:admin, system:power, system:volume, system:clipboard, app:launch, app:control, app:list, app:close, memory:read, memory:write, memory:delete, memory:search, voice:stt, voice:tts, voice:wake-word, voice:mic, phone:outbound, phone:inbound, phone:contacts, phone:sms, phone:record, screen:capture, screen:ocr, screen:analyze, screen:record, automation:input, automation:window, automation:macro, plugin:install, plugin:update, plugin:remove
 
 Risk levels: low, medium, high, critical
 
-Analyze carefully. Simple questions need minimal analysis. Complex multi-step tasks need detailed breakdown."""
+Analyze carefully. Simple questions need minimal analysis. Complex multi-step tasks need detailed breakdown.
+
+For desktop automation requests:
+- Identify the target application
+- Determine if UI Automation or vision fallback is needed
+- Identify required interactions (click, type, shortcuts, etc.)
+- Check if blueprint knowledge is available
+- Plan for verification and recovery
+
+For browser automation requests:
+- Identify target website/URL
+- Determine if DOM or accessibility is sufficient
+- Plan for vision fallback if needed
+- Consider multi-tab scenarios
+- Plan for form filling, navigation, extraction
+"""
 
 
 class TaskUnderstandingEngine:
@@ -176,9 +191,18 @@ class TaskUnderstandingEngine:
                 estimated_duration_seconds=2.0,
             )
         
-        # App launch/close
-        app_launch_patterns = ["launch ", "open ", "start ", "run "]
-        if any(request_lower.startswith(p) for p in app_launch_patterns) and len(request) < 200:
+        # App launch/close - but only for simple single-action requests
+        # Multi-part requests (e.g., "open notepad and take screenshot") should use LLM analysis
+        simple_launch_patterns = ["launch ", "open ", "start ", "run "]
+        simple_close_patterns = ["close ", "exit ", "quit "]
+        
+        # Check if request appears to be a simple single-action request
+        is_simple_request = (
+            len(request.split()) < 10 and  # Short request
+            not any(conj in request_lower for conj in [" and ", " then ", ", ", "; "])  # No conjunctions
+        )
+        
+        if is_simple_request and any(request_lower.startswith(p) for p in simple_launch_patterns) and len(request) < 200:
             return TaskAnalysis(
                 intent=TaskIntent(primary="system_control", confidence=0.85),
                 task_type=TaskType.TOOL_USE,
@@ -191,8 +215,7 @@ class TaskUnderstandingEngine:
                 estimated_duration_seconds=3.0,
             )
         
-        app_close_patterns = ["close ", "exit ", "quit "]
-        if any(request_lower.startswith(p) for p in app_close_patterns) and len(request) < 200:
+        if is_simple_request and any(request_lower.startswith(p) for p in simple_close_patterns) and len(request) < 200:
             return TaskAnalysis(
                 intent=TaskIntent(primary="system_control", confidence=0.85),
                 task_type=TaskType.TOOL_USE,
@@ -343,40 +366,81 @@ class TaskUnderstandingEngine:
         word_count = len(request.split())
         
         # Determine if tools needed
-        tool_keywords = ["search", "find", "read", "write", "list", "delete", "create", "run", "execute", "launch", "open", "close", "get", "set", "install", "update", "remove"]
+        tool_keywords = ["search", "find", "read", "write", "list", "delete", "create", "run", "execute", "launch", "open", "close", "get", "set", "install", "update", "remove", "screenshot", "capture"]
         needs_tools = any(kw in request_lower for kw in tool_keywords)
         
         # Determine if memory needed
         memory_keywords = ["remember", "recall", "previous", "earlier", "last time", "before", "history", "context"]
         needs_memory = any(kw in request_lower for kw in memory_keywords)
         
+        # Detect capabilities from request
+        requirements = []
+        if any(w in request_lower for w in ["launch", "open", "start"]):
+            requirements.append(TaskRequirement(capability="app:launch", description="Launch application", required=True))
+        if any(w in request_lower for w in ["close", "exit", "quit"]):
+            requirements.append(TaskRequirement(capability="app:control", description="Close or control application", required=True))
+        if any(w in request_lower for w in ["screenshot", "capture screen", "take a screenshot"]):
+            requirements.append(TaskRequirement(capability="screen:capture", description="Capture screen", required=True))
+        if any(w in request_lower for w in ["ocr", "read screen", "recognize text"]):
+            requirements.append(TaskRequirement(capability="screen:ocr", description="Screen OCR", required=True))
+        if any(w in request_lower for w in ["type", "press key", "keyboard"]):
+            requirements.append(TaskRequirement(capability="automation:input", description="Keyboard input", required=True))
+        if any(w in request_lower for w in ["system info", "cpu usage", "memory usage"]):
+            requirements.append(TaskRequirement(capability="system:info", description="Get system info", required=True))
+        if any(w in request_lower for w in ["read file", "open file", "cat "]):
+            requirements.append(TaskRequirement(capability="file:read", description="Read file", required=True))
+        if any(w in request_lower for w in ["write file", "save file", "create file"]):
+            requirements.append(TaskRequirement(capability="file:write", description="Write file", required=True))
+        if any(w in request_lower for w in ["search", "look up", "google"]):
+            requirements.append(TaskRequirement(capability="web:search", description="Search the web", required=True))
+        if any(w in request_lower for w in ["click", "press", "mouse"]):
+            requirements.append(TaskRequirement(capability="automation:mouse", description="Mouse control", required=True))
+        if any(w in request_lower for w in ["screenshot", "capture screen", "take a screenshot"]):
+            requirements.append(TaskRequirement(capability="screen:capture", description="Capture screen", required=True))
+        if any(w in request_lower for w in ["ocr", "read screen", "recognize text"]):
+            requirements.append(TaskRequirement(capability="screen:ocr", description="Screen OCR", required=True))
+        if any(w in request_lower for w in ["analyze screen", "understand screen", "what's on screen"]):
+            requirements.append(TaskRequirement(capability="screen:analyze", description="Analyze screen", required=True))
+        if any(w in request_lower for w in ["browser", "website", "web page", "chrome", "edge", "firefox"]):
+            requirements.append(TaskRequirement(capability="web:automate", description="Browser automation", required=True))
+        if any(w in request_lower for w in ["navigate", "go to", "visit"]):
+            requirements.append(TaskRequirement(capability="web:browse", description="Web browsing", required=True))
+        if any(w in request_lower for w in ["fill form", "form fill", "type in"]):
+            requirements.append(TaskRequirement(capability="automation:input", description="Form filling", required=True))
+        
         # Determine complexity
-        if word_count < 20 and not needs_tools:
+        if len(requirements) > 1:
+            complexity = TaskComplexity.MEDIUM
+            task_type = TaskType.MULTI_STEP
+            estimated_subtasks = len(requirements)
+        elif word_count < 20 and not needs_tools:
             complexity = TaskComplexity.TRIVIAL
             task_type = TaskType.SIMPLE
             estimated_subtasks = 1
         elif word_count < 50 and needs_tools:
             complexity = TaskComplexity.LOW
             task_type = TaskType.TOOL_USE
-            estimated_subtasks = 2
+            estimated_subtasks = max(1, len(requirements))
         elif word_count < 150:
             complexity = TaskComplexity.MEDIUM
             task_type = TaskType.MULTI_STEP
-            estimated_subtasks = 3
+            estimated_subtasks = max(3, len(requirements))
         else:
             complexity = TaskComplexity.HIGH
             task_type = TaskType.COMPLEX
-            estimated_subtasks = 5
+            estimated_subtasks = max(5, len(requirements))
         
         return TaskAnalysis(
-            intent=TaskIntent(primary="other", confidence=0.5),
+            intent=TaskIntent(primary="task_orchestration" if len(requirements) > 1 else "other", confidence=0.7),
             task_type=task_type,
             complexity=complexity,
             needs_memory=needs_memory,
             needs_tools=needs_tools,
+            requirements=requirements,
             estimated_subtasks=estimated_subtasks,
-            estimated_duration_seconds=estimated_subtasks * 10.0,
-            risk_level="low",
+            estimated_duration_seconds=estimated_subtasks * 5.0,
+            risk_level="high" if any(r.capability in ["app:launch", "app:control", "file:delete"] for r in requirements) else "low",
+            requires_approval=any(r.capability in ["app:launch", "app:control", "file:delete"] for r in requirements),
         )
 
 

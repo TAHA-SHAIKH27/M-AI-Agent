@@ -60,7 +60,26 @@ class ExecutionStateManager:
             if exec_file.exists():
                 data = json.loads(exec_file.read_text(encoding="utf-8"))
                 for task_id, record_data in data.items():
-                    # Convert to TaskExecutionRecord
+                    # Convert status string to enum if needed
+                    if "status" in record_data and isinstance(record_data["status"], str):
+                        try:
+                            record_data["status"] = TaskExecutionStatus(record_data["status"])
+                        except ValueError:
+                            pass
+                    # Convert subtask_records dictionaries to SubtaskExecutionRecord if needed
+                    if "subtask_records" in record_data and isinstance(record_data["subtask_records"], list):
+                        conv_records = []
+                        for sr in record_data["subtask_records"]:
+                            if isinstance(sr, dict):
+                                if "status" in sr and isinstance(sr["status"], str):
+                                    try:
+                                        sr["status"] = SubtaskExecutionStatus(sr["status"])
+                                    except ValueError:
+                                        pass
+                                conv_records.append(SubtaskExecutionRecord(**sr))
+                            else:
+                                conv_records.append(sr)
+                        record_data["subtask_records"] = conv_records
                     self._execution_records[task_id] = TaskExecutionRecord(**record_data)
             
             # Load subtask records
@@ -69,16 +88,29 @@ class ExecutionStateManager:
                 for task_file in subtask_dir.glob("*.json"):
                     task_id = task_file.stem
                     data = json.loads(task_file.read_text(encoding="utf-8"))
-                    self._subtask_records[task_id] = {
-                        sid: SubtaskExecutionRecord(**sdata)
-                        for sid, sdata in data.items()
-                    }
+                    task_subs = {}
+                    for sid, sdata in data.items():
+                        if isinstance(sdata, dict):
+                            if "status" in sdata and isinstance(sdata["status"], str):
+                                try:
+                                    sdata["status"] = SubtaskExecutionStatus(sdata["status"])
+                                except ValueError:
+                                    pass
+                            task_subs[sid] = SubtaskExecutionRecord(**sdata)
+                        else:
+                            task_subs[sid] = sdata
+                    self._subtask_records[task_id] = task_subs
             
             # Load checkpoints
             checkpoint_dir = self.data_dir / "checkpoints"
             if checkpoint_dir.exists():
                 for cp_file in checkpoint_dir.glob("*.json"):
                     data = json.loads(cp_file.read_text(encoding="utf-8"))
+                    if "checkpoint_type" in data and isinstance(data["checkpoint_type"], str):
+                        try:
+                            data["checkpoint_type"] = CheckpointType(data["checkpoint_type"])
+                        except ValueError:
+                            pass
                     checkpoint = Checkpoint(**data)
                     self._checkpoints[checkpoint.checkpoint_id] = checkpoint
                     

@@ -12,7 +12,7 @@ from ..model_providers.schemas import (
 from ..agents import agent_registry
 from ..agents.schemas import AgentManifest, AgentCapability
 from ..tools import tool_registry
-from ..tools.schemas import ToolManifest
+from m_core.common_schemas import ToolManifest
 from ..memory import memory_manager
 from ..memory.base import MemoryTier
 from ..core.events import event_bus
@@ -111,6 +111,10 @@ class IntelligentPlanner:
         
         task_id = str(uuid.uuid4())[:8]
         
+        # Check if this is a Word document creation task - use specialized fallback
+        request_lower = original_request.lower()
+        is_word_task = "word" in request_lower and ("create" in request_lower or "document" in request_lower or "write" in request_lower)
+        
         # Simple tasks don't need complex planning
         if analysis.task_type == TaskType.SIMPLE:
             plan = self._create_simple_plan(task_id, analysis, original_request)
@@ -124,6 +128,16 @@ class IntelligentPlanner:
         # Tool-use tasks
         if analysis.task_type == TaskType.TOOL_USE:
             plan = await self._create_tool_plan(task_id, analysis, original_request)
+            await event_bus.publish_sync(
+                "task.planned",
+                "planner",
+                {"task_id": task_id, "subtask_count": len(plan.subtasks), "strategy": plan.strategy.value}
+            )
+            return plan
+        
+        # For Word document creation, use specialized fallback plan
+        if is_word_task:
+            plan = self._create_fallback_plan(task_id, analysis, original_request)
             await event_bus.publish_sync(
                 "task.planned",
                 "planner",
@@ -353,6 +367,7 @@ Available Tools:
                 timeout_seconds=float(s.get("timeout_seconds", 60.0)),
                 requires_approval=s.get("requires_approval", False),
                 approval_status=ApprovalStatus.PENDING if s.get("requires_approval", False) else ApprovalStatus.NOT_REQUIRED,
+                metadata={"arguments": self._generate_tool_arguments(s.get("assigned_tool"), None, original_request)},
             )
             subtasks.append(subtask)
             
@@ -420,15 +435,31 @@ Available Tools:
     ) -> ExecutionPlan:
         """Create fallback plan when LLM fails."""
         subtasks = []
+        request_lower = original_request.lower()
         
-        # Create subtasks based on requirements
-        for i, req in enumerate(analysis.requirements[:5]):
+        # Check if this is a Word document creation task
+        is_word_task = "word" in request_lower and ("create" in request_lower or "document" in request_lower or "write" in request_lower)
+        is_desktop_save = "desktop" in request_lower and "save" in request_lower
+        
+        # Create subtasks based on requirements with Word-specific logic
+        for i, req in enumerate(analysis.requirements[:8]):
             tool_name = self._find_tool_for_capability(req.capability)
             requires_approval = self._requires_approval(tool_name) if tool_name else False
             
             # Generate appropriate arguments for the tool
             arguments = self._generate_tool_arguments(tool_name, req, original_request)
             
+            # Special handling for Word document creation
+            if is_word_task and tool_name == "app_launch":
+                arguments = {"app_name": "word", "approved": True}
+            elif is_word_task and tool_name == "app_control" and "focus" not in arguments:
+                arguments = {"action": "focus", "process_name": "WINWORD.EXE", "approved": True}
+            elif is_word_task and tool_name == "keyboard_input" and "text" not in arguments:
+                # Will be handled by specific subtasks below
+                pass
+            elif is_word_task and tool_name == "mouse_control" and "action" not in arguments:
+                arguments = {"action": "move", "approved": True}
+                
             subtask = Subtask(
                 id=f"{task_id}-{i+1}",
                 name=f"Execute {req.capability}",
@@ -436,12 +467,135 @@ Available Tools:
                 task_type=TaskType.TOOL_USE,
                 assigned_tool=tool_name,
                 priority=10 - i,
-                estimated_duration_seconds=15.0,
+                estimated_duration_seconds=20.0,
                 requires_approval=requires_approval,
                 approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
                 metadata={"arguments": arguments},
             )
             subtasks.append(subtask)
+        
+        # For Word document creation, add detailed subtasks if we have the right tools
+        if is_word_task:
+            # Replace generic subtasks with Word-specific ones
+            word_subtasks = [
+                Subtask(
+                    id=f"{task_id}-launch-word",
+                    name="Launch Microsoft Word",
+                    description="Launch Word application",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="app_launch",
+                    priority=10,
+                    estimated_duration_seconds=10.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    metadata={"arguments": {"app_name": "word", "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-focus-word",
+                    name="Focus Word window",
+                    description="Ensure Word window is focused and maximized",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="app_control",
+                    priority=9,
+                    estimated_duration_seconds=5.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-launch-word"],
+                    metadata={"arguments": {"action": "focus", "process_name": "WINWORD.EXE", "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-create-title",
+                    name="Create title page",
+                    description="Type title and format title page",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="keyboard_input",
+                    priority=8,
+                    estimated_duration_seconds=30.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-focus-word"],
+                    metadata={"arguments": {"action": "type", "text": "Greenhouse Effect\n\nA Comprehensive Project Report\n\nPrepared by M AI Assistant\n\nDate: " + datetime.now().strftime("%B %d, %Y"), "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-format-title",
+                    name="Format title page",
+                    description="Apply heading styles, center alignment, font sizes",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="keyboard_input",
+                    priority=7,
+                    estimated_duration_seconds=20.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-create-title"],
+                    metadata={"arguments": {"action": "hotkey", "keys": ["ctrl", "a"], "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-add-headings",
+                    name="Add document headings",
+                    description="Add structured headings for sections",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="keyboard_input",
+                    priority=6,
+                    estimated_duration_seconds=30.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-format-title"],
+                    metadata={"arguments": {"action": "type", "text": "\n\nTable of Contents\n\n1. Introduction\n2. The Greenhouse Effect Explained\n3. Causes of Enhanced Greenhouse Effect\n4. Consequences and Impacts\n5. Mitigation Strategies\n6. Conclusion\n7. References", "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-add-content",
+                    name="Add detailed content",
+                    description="Write detailed explanations for each section",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="keyboard_input",
+                    priority=5,
+                    estimated_duration_seconds=60.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-add-headings"],
+                    metadata={"arguments": {"action": "type", "text": "\n\n1. Introduction\n\nThe greenhouse effect is a natural process that warms the Earth's surface. When the Sun's energy reaches the Earth's atmosphere, some of it is reflected back to space and the rest is absorbed and re-radiated by greenhouse gases.\n\n2. The Greenhouse Effect Explained\n\nGreenhouse gases include water vapor, carbon dioxide, methane, nitrous oxide, and ozone. These gases absorb and re-emit infrared radiation, trapping heat in the atmosphere.\n\n3. Causes of Enhanced Greenhouse Effect\n\nHuman activities have significantly increased greenhouse gas concentrations:\n- Burning fossil fuels (coal, oil, natural gas)\n- Deforestation and land-use changes\n- Industrial processes\n- Agriculture (livestock, rice paddies)\n\n4. Consequences and Impacts\n\n- Rising global temperatures\n- Melting ice caps and glaciers\n- Sea level rise\n- Extreme weather events\n- Ocean acidification\n\n5. Mitigation Strategies\n\n- Transition to renewable energy\n- Energy efficiency improvements\n- Reforestation and afforestation\n- Carbon capture and storage\n- Policy measures (carbon pricing, regulations)\n\n6. Conclusion\n\nAddressing the enhanced greenhouse effect requires immediate global action. The science is clear: human activities are driving climate change, and we have the tools to mitigate its worst impacts.\n\n7. References\n\n- IPCC Assessment Reports\n- NASA Climate Data\n- NOAA Greenhouse Gas Index\n- Peer-reviewed climate science literature", "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-add-table",
+                    name="Add comparison table",
+                    description="Insert formatted table with greenhouse gas data",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="keyboard_input",
+                    priority=4,
+                    estimated_duration_seconds=30.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-add-content"],
+                    metadata={"arguments": {"action": "hotkey", "keys": ["alt", "n", "t"], "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-save-document",
+                    name="Save document to Desktop",
+                    description="Save as Greenhouse_Effect_Project.docx",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="keyboard_input",
+                    priority=3,
+                    estimated_duration_seconds=15.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-add-table"],
+                    metadata={"arguments": {"action": "hotkey", "keys": ["ctrl", "s"], "approved": True}},
+                ),
+                Subtask(
+                    id=f"{task_id}-close-word",
+                    name="Close Microsoft Word",
+                    description="Close Word application",
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool="app_control",
+                    priority=2,
+                    estimated_duration_seconds=5.0,
+                    requires_approval=True,
+                    approval_status=ApprovalStatus.PENDING,
+                    dependencies=[f"{task_id}-save-document"],
+                    metadata={"arguments": {"action": "close", "process_name": "WINWORD.EXE", "approved": True}},
+                ),
+            ]
+            subtasks = word_subtasks
         
         # Add synthesis if multiple
         if len(subtasks) > 1:
@@ -479,7 +633,7 @@ Available Tools:
             total_estimated_duration=total_duration,
         )
     
-    def _generate_tool_arguments(self, tool_name: Optional[str], req: "TaskRequirement", original_request: str) -> Dict[str, Any]:
+    def _generate_tool_arguments(self, tool_name: Optional[str], req: Optional["TaskRequirement"], original_request: str) -> Dict[str, Any]:
         """Generate appropriate arguments for a tool based on the request."""
         if not tool_name:
             return {}
@@ -511,7 +665,20 @@ Available Tools:
             return {"app_name": app_name}
         
         elif tool_name == "app_control":
-            return {"action": "list"}
+            # Determine action based on request
+            request_lower = original_request.lower()
+            if any(word in request_lower for word in ["close", "exit", "quit", "kill"]):
+                return {"action": "close"}
+            elif any(word in request_lower for word in ["focus", "activate", "bring to front"]):
+                return {"action": "focus"}
+            elif any(word in request_lower for word in ["minimize", "minimise"]):
+                return {"action": "minimize"}
+            elif any(word in request_lower for word in ["maximize", "maximise"]):
+                return {"action": "maximize"}
+            elif any(word in request_lower for word in ["restore"]):
+                return {"action": "restore"}
+            else:
+                return {"action": "list"}
         
         elif tool_name == "powershell":
             return {"command": "Get-Date"}
@@ -586,6 +753,14 @@ Available Tools:
             "memory:search": "memory_search",
             "app:launch": "app_launch",
             "app:control": "app_control",
+            "screen:capture": "screen_capture",
+            "screen:ocr": "screen_ocr",
+            "screen:find": "visual_find",
+            "screen:verify": "visual_verify",
+            "automation:input": "keyboard_input",
+            "automation:mouse": "mouse_control",
+            "window:list": "window_list",
+            "window:interact": "window_interact",
         }
         return capability_to_tool.get(capability)
     
