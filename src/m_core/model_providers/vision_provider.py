@@ -1,20 +1,24 @@
-"""Vision model provider for GUI understanding and visual grounding.
+"""Vision model provider abstraction for GUI understanding and visual grounding.
 
-This provider uses NVIDIA's cloud vision API (Nemotron or NVLM models) for:
-- GUI element detection with bounding boxes
+Supports multiple vision providers with automatic fallback:
+- PRIMARY: NVIDIA NIM/API vision models (NVLM, Nemotron-3V, etc.)
+- FALLBACK: Google Gemini API with image input
+
+Provides structured JSON output for:
+- Screen analysis with element detection
 - Visual grounding (finding elements by description)
-- Screen understanding (describing what's on screen)
-- Element classification (button, input, text, etc.)
-- Action verification (before/after screenshot comparison)
-- Next action recommendations for automation
+- Action planning (next action recommendations)
+- Action verification (before/after comparison)
 """
 import asyncio
 import base64
 import io
+import json
 import structlog
-from pathlib import Path
+import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
-from dataclasses import dataclass
+from enum import Enum
 
 import httpx
 
@@ -29,52 +33,143 @@ from ..config import settings
 logger = structlog.get_logger(__name__)
 
 
+class VisionProviderType(str, Enum):
+    """Supported vision provider types."""
+    NVIDIA_NIM = "nvidia_nim"
+    GEMINI = "gemini"
+
+
 @dataclass
 class VisionConfig:
     """Configuration for vision model provider."""
-    model_id: str = "nvidia/nv-embed-v1"  # Will use vision model from NVIDIA
-    device: str = "auto"  # cloud only
-    confidence_threshold: float = 0.3
-    max_elements: int = 50
-    screenshot_scale: float = 1.0
-    # NVIDIA API specific
+    # Provider selection
+    primary_provider: VisionProviderType = VisionProviderType.NVIDIA_NIM
+    fallback_providers: List[VisionProviderType] = field(default_factory=lambda: [VisionProviderType.GEMINI])
+    
+    # NVIDIA NIM settings
     nvidia_api_key: Optional[str] = None
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    vision_model: str = "nvidia/nv-embed-v1"  # Vision-capable model
+    nvidia_vision_model: str = "nvidia/nvlm-d-72b"  # NVLM-D-72B vision model
+    
+    # Google Gemini settings
+    gemini_api_key: Optional[str] = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_vision_model: str = "gemini-2.5-flash"
+    
+    # Common settings
+    confidence_threshold: float = 0.3
+    max_elements: int = 50
+    timeout_seconds: float = 60.0
+    max_retries: int = 3
+    retry_delay_seconds: float = 1.0
+    
+    # Rate limiting
+    requests_per_minute: int = 30
+    
+    def __post_init__(self):
+        """Populate from settings if not explicitly set."""
+        # Only populate from settings if the field wasn't explicitly provided
+        # (We can't easily detect this, so we'll always use settings as fallback)
+        if self.nvidia_api_key is None:
+            self.nvidia_api_key = settings.nvidia_api_key
+        if self.nvidia_base_url == "https://integrate.api.nvidia.com/v1" and settings.nvidia_base_url:
+            self.nvidia_base_url = settings.nvidia_base_url
+        if self.nvidia_vision_model == "nvidia/nvlm-d-72b" and settings.nvidia_vision_model:
+            self.nvidia_vision_model = settings.nvidia_vision_model
+            
+        if self.gemini_api_key is None:
+            self.gemini_api_key = settings.gemini_api_key
+        if self.gemini_base_url == "https://generativelanguage.googleapis.com/v1beta" and settings.gemini_base_url:
+            self.gemini_base_url = settings.gemini_base_url
+        if self.gemini_vision_model == "gemini-1.5-flash" and settings.gemini_vision_model:
+            self.gemini_vision_model = settings.gemini_vision_model
 
 
-class VisionModelProvider(ModelProvider):
-    """Vision model provider using NVIDIA Cloud API for GUI understanding.
+@dataclass
+class VisionAction:
+    """Structured action returned by vision model."""
+    action: str  # click, type, hotkey, wait, scroll, navigate, complete, error
+    target: str  # element description or coordinates
+    params: Dict[str, Any]  # {"text": "...", "keys": [...], "x": 0, "y": 0}
+    reasoning: str
+    confidence: float
+    is_complete: bool = False
+    expected_result: Optional[str] = None
+    screen_state: Optional[str] = None
     
-    Supports:
-    - GUI element detection with bounding boxes via NVIDIA vision models
-    - Visual grounding (finding elements by description)
-    - Screen understanding (describing what's on screen)
-    - Element classification (button, input, text, etc.)
-    - Action verification (before/after screenshot comparison)
-    - Next action recommendations for desktop automation
-    """
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action": self.action,
+            "target": self.target,
+            "params": self.params,
+            "reasoning": self.reasoning,
+            "confidence": self.confidence,
+            "is_complete": self.is_complete,
+            "expected_result": self.expected_result,
+            "screen_state": self.screen_state,
+        }
     
-    def __init__(self, config: Optional[VisionConfig] = None):
-        self.config = config or VisionConfig()
-        # Override with settings if available
-        if settings.nvidia_api_key:
-            self.config.nvidia_api_key = settings.nvidia_api_key
-        if settings.nvidia_base_url:
-            self.config.nvidia_base_url = settings.nvidia_base_url.rstrip("/")
-            if not self.config.nvidia_base_url.endswith("/v1"):
-                self.config.nvidia_base_url += "/v1"
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VisionAction":
+        return cls(
+            action=data.get("action", "error"),
+            target=data.get("target", ""),
+            params=data.get("params", {}),
+            reasoning=data.get("reasoning", ""),
+            confidence=float(data.get("confidence", 0.0)),
+            is_complete=data.get("is_complete", False),
+            expected_result=data.get("expected_result"),
+            screen_state=data.get("screen_state"),
+        )
+
+
+@dataclass
+class ScreenAnalysis:
+    """Structured screen analysis from vision model."""
+    description: str
+    elements: List[Dict[str, Any]]
+    text_content: str
+    suggested_actions: List[str]
+    app_type: str
+    model_type: str
+    screenshot_dimensions: Dict[str, int]
+    timestamp: float = field(default_factory=time.time)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "description": self.description,
+            "elements": self.elements,
+            "text_content": self.text_content,
+            "suggested_actions": self.suggested_actions,
+            "app_type": self.app_type,
+            "model_type": self.model_type,
+            "screenshot_dimensions": self.screenshot_dimensions,
+            "timestamp": self.timestamp,
+        }
+
+
+class BaseVisionProvider(ModelProvider):
+    """Base class for vision providers."""
+    
+    def __init__(self, config: VisionConfig):
+        self.config = config
         self._initialized = False
         self._client: Optional[httpx.AsyncClient] = None
-        self._model_type = "nvidia-cloud"
+        self._last_request_time = 0.0
+        self._request_count = 0
+        self._rate_limit_window_start = time.time()
+    
+    @property
+    def provider_type_name(self) -> VisionProviderType:
+        raise NotImplementedError
     
     @property
     def provider_id(self) -> str:
-        return "vision-gui"
+        return f"vision-{self.provider_type_name.value}"
     
     @property
     def provider_name(self) -> str:
-        return "NVIDIA Vision GUI Understanding"
+        return f"{self.provider_type_name.value.title()} Vision"
     
     @property
     def provider_type(self) -> str:
@@ -83,7 +178,7 @@ class VisionModelProvider(ModelProvider):
     @property
     def capabilities(self) -> ModelCapability:
         return ModelCapability(
-            chat=True,  # Can do chat with vision
+            chat=True,
             streaming=False,
             function_calling=True,
             vision=True,
@@ -93,53 +188,263 @@ class VisionModelProvider(ModelProvider):
         )
     
     async def initialize(self) -> None:
-        """Initialize the vision model via NVIDIA API."""
-        if self._initialized:
-            return
-        
-        if not self.config.nvidia_api_key:
-            logger.warning("NVIDIA API key not configured - Vision provider disabled")
-            self._initialized = False
-            return
-        
-        try:
-            self._client = httpx.AsyncClient(
-                base_url=self.config.nvidia_base_url,
-                headers={
-                    "Authorization": f"Bearer {self.config.nvidia_api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=httpx.Timeout(120.0, connect=10.0),
-            )
-            
-            # Test connection with a simple request
-            test_response = await self._client.post(
-                "/chat/completions",
-                json={
-                    "model": self.config.vision_model,
-                    "messages": [
-                        {"role": "user", "content": "test"}
-                    ],
-                    "max_tokens": 10,
-                }
-            )
-            
-            if test_response.status_code == 200:
-                self._initialized = True
-                logger.info(f"Vision provider initialized with NVIDIA model: {self.config.vision_model}")
-            else:
-                logger.warning(f"NVIDIA API test failed: {test_response.status_code} - {test_response.text}")
-                self._initialized = False
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize vision provider: {e}")
-            self._initialized = False
+        """Initialize the vision provider."""
+        raise NotImplementedError
     
     async def close(self) -> None:
         """Close the HTTP client."""
         if self._client:
             await self._client.aclose()
             self._client = None
+    
+    async def _rate_limit(self) -> None:
+        """Enforce rate limiting."""
+        now = time.time()
+        if now - self._rate_limit_window_start >= 60:
+            self._request_count = 0
+            self._rate_limit_window_start = now
+        
+        if self._request_count >= self.config.requests_per_minute:
+            wait_time = 60 - (now - self._rate_limit_window_start)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            self._request_count = 0
+            self._rate_limit_window_start = time.time()
+        
+        # Minimum delay between requests
+        time_since_last = now - self._last_request_time
+        min_delay = 60.0 / self.config.requests_per_minute
+        if time_since_last < min_delay:
+            await asyncio.sleep(min_delay - time_since_last)
+        
+        self._last_request_time = time.time()
+        self._request_count += 1
+    
+    async def _make_request_with_retry(
+        self,
+        url: str,
+        payload: Dict[str, Any],
+        headers: Dict[str, str],
+    ) -> Optional[httpx.Response]:
+        """Make HTTP request with retry logic."""
+        for attempt in range(self.config.max_retries):
+            await self._rate_limit()
+            
+            try:
+                response = await self._client.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
+                )
+                
+                if response.status_code == 429:  # Rate limited
+                    retry_after = int(response.headers.get("Retry-After", self.config.retry_delay_seconds * (attempt + 1)))
+                    logger.warning(f"{self.provider_name} rate limited, waiting {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+                
+                if response.status_code >= 500:  # Server error
+                    if attempt < self.config.max_retries - 1:
+                        await asyncio.sleep(self.config.retry_delay_seconds * (attempt + 1))
+                        continue
+                
+                return response
+                
+            except httpx.TimeoutException:
+                logger.warning(f"{self.provider_name} request timeout (attempt {attempt + 1})")
+                if attempt < self.config.max_retries - 1:
+                    await asyncio.sleep(self.config.retry_delay_seconds * (attempt + 1))
+                    continue
+            except Exception as e:
+                logger.error(f"{self.provider_name} request error: {e}")
+                if attempt < self.config.max_retries - 1:
+                    await asyncio.sleep(self.config.retry_delay_seconds * (attempt + 1))
+                    continue
+        
+        return None
+    
+    def _build_analysis_prompt(self, task: str) -> str:
+        """Build prompt for screen analysis."""
+        return f"""You are a GUI automation expert. Analyze this screenshot and provide a structured JSON response.
+
+Task context: {task}
+
+Return ONLY valid JSON with this exact structure:
+{{
+  "description": "Brief description of what's on screen",
+  "elements": [
+    {{"type": "button|input|text|link|menu|checkbox|radio|dropdown|tab|window|dialog|icon|image|unknown", "label": "visible text or aria-label", "description": "what this element does", "bbox": {{"left": x, "top": y, "width": w, "height": h}}, "confidence": 0.0-1.0}}
+  ],
+  "text_content": "all visible text concatenated",
+  "suggested_actions": ["action 1", "action 2"],
+  "app_type": "notepad|word|excel|chrome|edge|explorer|terminal|steam|discord|vscode|unknown"
+}}"""
+    
+    def _build_action_prompt(self, task: str, previous_actions: List[str]) -> str:
+        """Build prompt for next action planning."""
+        prev = "\n".join(previous_actions) if previous_actions else "None"
+        return f"""You are a GUI automation agent. Given the current screen and task, decide the next action.
+
+Task: {task}
+Previous actions: {prev}
+
+Return ONLY valid JSON:
+{{
+  "action": "click|type|hotkey|wait|scroll|navigate|complete|error",
+  "target": "element description or coordinates",
+  "params": {{"text": "...", "keys": [...], "x": 0, "y": 0}},
+  "reasoning": "why this action",
+  "confidence": 0.0-1.0,
+  "is_complete": true/false,
+  "expected_result": "what should happen after this action",
+  "screen_state": "current screen description"
+}}"""
+    
+    def _build_verification_prompt(self, expected_change: str) -> str:
+        """Build prompt for action verification."""
+        return f"""You are a GUI automation expert. Compare these two screenshots and verify if the expected change occurred: "{expected_change}"
+
+Return ONLY valid JSON:
+{{
+  "verified": true/false,
+  "confidence": 0.0-1.0,
+  "reasoning": "explanation of what changed",
+  "before_elements_count": N,
+  "after_elements_count": N
+}}"""
+    
+    def _parse_vision_json(self, response_text: str) -> Dict[str, Any]:
+        """Parse vision model response into structured data."""
+        import re
+        
+        try:
+            # Find JSON in response (may have markdown code blocks)
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try to find JSON object directly
+                json_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    json_str = response_text
+            
+            data = json.loads(json_str)
+            return data
+        except Exception as e:
+            logger.warning(f"Failed to parse vision response as JSON: {e}")
+            return {"error": "Failed to parse response", "raw": response_text[:500]}
+    
+    async def analyze_screen(
+        self,
+        screenshot_base64: str,
+        task_description: str = "",
+        region: Optional[Dict[str, int]] = None,
+    ) -> ScreenAnalysis:
+        """Analyze a screenshot and return structured GUI understanding."""
+        raise NotImplementedError
+    
+    async def get_next_action(
+        self,
+        screenshot_base64: str,
+        current_task: str,
+        previous_actions: List[str] = None,
+    ) -> VisionAction:
+        """Get the next recommended action for automation."""
+        raise NotImplementedError
+    
+    async def verify_action(
+        self,
+        before_screenshot: str,
+        after_screenshot: str,
+        expected_change: str,
+    ) -> Dict[str, Any]:
+        """Verify that an action produced the expected visual change."""
+        raise NotImplementedError
+    
+    # ModelProvider abstract methods - vision providers are specialized, not general chat
+    async def complete(self, request: CompletionRequest) -> CompletionResponse:
+        """Not supported for vision providers."""
+        return CompletionResponse(
+            id="vision-not-supported",
+            model=self.config.nvidia_vision_model if hasattr(self.config, 'nvidia_vision_model') else "vision",
+            content="Vision provider does not support direct chat completion. Use analyze_screen() or get_next_action() instead.",
+            finish_reason="error",
+        )
+    
+    async def stream(self, request: CompletionRequest):
+        """Not supported for vision providers."""
+        yield StreamChunk(
+            id="vision-not-supported",
+            content="Vision provider does not support streaming chat.",
+            finish_reason="error",
+            is_final=True,
+        )
+    
+    async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
+        """Not supported for vision providers."""
+        return EmbeddingResponse(
+            object="list",
+            data=[],
+            model=self.config.nvidia_vision_model if hasattr(self.config, 'nvidia_vision_model') else "vision",
+        )
+
+
+class NVIDIANIMVisionProvider(BaseVisionProvider):
+    """NVIDIA NIM/API Vision Provider using vision-capable models like NVLM."""
+    
+    @property
+    def provider_type_name(self) -> VisionProviderType:
+        return VisionProviderType.NVIDIA_NIM
+    
+    async def initialize(self) -> None:
+        """Initialize the NVIDIA vision provider."""
+        if self._initialized:
+            return
+        
+        # Use NVIDIA API key from config or settings
+        api_key = self.config.nvidia_api_key or settings.nvidia_api_key
+        if not api_key:
+            logger.warning("NVIDIA API key not configured - NVIDIA vision provider disabled")
+            self._initialized = False
+            return
+        
+        base_url = self.config.nvidia_base_url or settings.nvidia_base_url
+        if not base_url.endswith("/v1"):
+            base_url = base_url.rstrip("/") + "/v1"
+        
+        try:
+            self._client = httpx.AsyncClient(
+                base_url=base_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
+            )
+            
+            # Test connection
+            test_response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.nvidia_vision_model,
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 10,
+                }
+            )
+            
+            if test_response.status_code == 200:
+                self._initialized = True
+                logger.info(f"NVIDIA vision provider initialized with model: {self.config.nvidia_vision_model}")
+            else:
+                logger.warning(f"NVIDIA vision API test failed: {test_response.status_code} - {test_response.text}")
+                self._initialized = False
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize NVIDIA vision provider: {e}")
+            self._initialized = False
     
     async def health_check(self) -> ProviderHealth:
         """Check provider health."""
@@ -151,11 +456,10 @@ class VisionModelProvider(ModelProvider):
             )
         
         try:
-            # Quick health check
             response = await self._client.post(
                 "/chat/completions",
                 json={
-                    "model": self.config.vision_model,
+                    "model": self.config.nvidia_vision_model,
                     "messages": [{"role": "user", "content": "ping"}],
                     "max_tokens": 5,
                 }
@@ -186,181 +490,37 @@ class VisionModelProvider(ModelProvider):
             return []
         
         return [ModelInfo(
-            id=self.config.vision_model,
-            name=f"NVIDIA Vision GUI Detection",
-            description="GUI element detection and screen understanding via NVIDIA Cloud API",
+            id=self.config.nvidia_vision_model,
+            name=f"NVIDIA Vision ({self.config.nvidia_vision_model})",
+            description="GUI element detection and screen understanding via NVIDIA NIM",
             capabilities={"vision": True, "gui_detection": True, "chat": True},
             max_context_length=4096,
         )]
-    
-    async def complete(self, request: CompletionRequest) -> CompletionResponse:
-        """Complete chat with vision support."""
-        if not self._initialized:
-            return CompletionResponse(
-                id="vision-not-initialized",
-                model=self.config.vision_model,
-                content="Vision provider not initialized. NVIDIA API key required.",
-                finish_reason="error",
-            )
-        
-        try:
-            # Build messages with images if present
-            messages = []
-            for msg in request.messages:
-                if msg.role == "user" and msg.content:
-                    content = msg.content
-                    # Check if content has images (vision)
-                    if isinstance(content, list):
-                        # Already structured with images
-                        messages.append({"role": "user", "content": content})
-                    else:
-                        messages.append({"role": msg.role, "content": content})
-                else:
-                    messages.append({"role": msg.role, "content": msg.content})
-            
-            response = await self._client.post(
-                "/chat/completions",
-                json={
-                    "model": self.config.vision_model,
-                    "messages": messages,
-                    "max_tokens": request.max_tokens or 4096,
-                    "temperature": request.temperature or 0.7,
-                }
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                return CompletionResponse(
-                    id=data.get("id", "vision-complete"),
-                    model=self.config.vision_model,
-                    content=content,
-                    finish_reason=data["choices"][0].get("finish_reason", "stop"),
-                    latency_ms=0,
-                )
-            else:
-                return CompletionResponse(
-                    id="vision-error",
-                    model=self.config.vision_model,
-                    content=f"API error: {response.status_code} - {response.text}",
-                    finish_reason="error",
-                )
-                
-        except Exception as e:
-            logger.error(f"Vision completion failed: {e}")
-            return CompletionResponse(
-                id="vision-error",
-                model=self.config.vision_model,
-                content=f"Error: {str(e)}",
-                finish_reason="error",
-            )
-    
-    async def stream(self, request: CompletionRequest):
-        """Stream not fully supported for vision provider."""
-        response = await self.complete(request)
-        yield StreamChunk(
-            id=response.id,
-            content=response.content,
-            finish_reason=response.finish_reason,
-            is_final=True,
-        )
-    
-    async def embed(self, request: EmbeddingRequest) -> EmbeddingResponse:
-        """Not supported for vision provider."""
-        return EmbeddingResponse(
-            object="list",
-            data=[],
-            model=self.config.vision_model,
-        )
-    
-    # ============================================================
-    # VISION-SPECIFIC METHODS FOR GUI AUTOMATION
-    # ============================================================
-    
-    def _build_vision_prompt(self, task: str, mode: str = "analyze") -> str:
-        """Build specialized prompts for GUI automation tasks."""
-        prompts = {
-            "analyze": """You are a GUI automation expert. Analyze this screenshot and provide a structured JSON response.
-
-Return ONLY valid JSON with this exact structure:
-{
-  "description": "Brief description of what's on screen",
-  "elements": [
-    {"type": "button|input|text|link|menu|checkbox|radio|dropdown|tab|window|dialog|icon|image|unknown", "label": "visible text or aria-label", "description": "what this element does", "bbox": {"left": x, "top": y, "width": w, "height": h}, "confidence": 0.0-1.0}
-  ],
-  "text_content": "all visible text concatenated",
-  "suggested_actions": ["action 1", "action 2"],
-  "app_type": "notepad|word|excel|chrome|edge|explorer|terminal|unknown"
-}""",
-            "find": f"""You are a GUI automation expert. Find elements matching: "{task}"
-
-Return ONLY valid JSON:
-{{
-  "elements": [
-    {{"type": "button|input|text|link|menu|checkbox|radio|dropdown|tab|window|dialog|icon|image|unknown", "label": "visible text", "description": "what this element does", "bbox": {{"left": x, "top": y, "width": w, "height": h}}, "confidence": 0.0-1.0}}
-  ]
-}}""",
-            "verify": f"""You are a GUI automation expert. Compare these two screenshots and verify if the expected change occurred: "{task}"
-
-Return ONLY valid JSON:
-{{
-  "verified": true/false,
-  "confidence": 0.0-1.0,
-  "reasoning": "explanation of what changed",
-  "before_elements_count": N,
-  "after_elements_count": N
-}}""",
-        }
-        return prompts.get(mode, prompts["analyze"])
-    
-    def _parse_vision_response(self, response_text: str, mode: str = "analyze") -> Dict[str, Any]:
-        """Parse the vision model response into structured data."""
-        import json
-        import re
-        
-        # Try to extract JSON from response
-        try:
-            # Find JSON in response (may have markdown code blocks)
-            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                # Try to find JSON object directly
-                json_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    json_str = response_text
-            
-            data = json.loads(json_str)
-            return data
-        except Exception as e:
-            logger.warning(f"Failed to parse vision response as JSON: {e}")
-            return {"error": "Failed to parse response", "raw": response_text}
     
     async def analyze_screen(
         self,
         screenshot_base64: str,
         task_description: str = "",
         region: Optional[Dict[str, int]] = None,
-    ) -> Dict[str, Any]:
-        """Analyze a screenshot and return structured GUI understanding."""
+    ) -> ScreenAnalysis:
+        """Analyze a screenshot using NVIDIA vision model."""
         if not self._initialized:
             await self.initialize()
         
         if not self._initialized:
-            return {
-                "error": "Vision provider not initialized. NVIDIA API key required.",
-                "elements": [],
-                "model_type": self._model_type,
-                "description": "Cannot analyze screen: Vision provider not available"
-            }
+            return ScreenAnalysis(
+                description="Cannot analyze screen: NVIDIA vision provider not available",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="nvidia_nim",
+                screenshot_dimensions={},
+            )
         
         try:
-            # Build prompt with task context
-            prompt = self._build_vision_prompt(task_description, "analyze")
+            prompt = self._build_analysis_prompt(task_description)
             
-            # Prepare message with image
             messages = [
                 {
                     "role": "user",
@@ -377,46 +537,76 @@ Return ONLY valid JSON:
                 }
             ]
             
-            response = await self._client.post(
+            response = await self._make_request_with_retry(
                 "/chat/completions",
-                json={
-                    "model": self.config.vision_model,
+                {
+                    "model": self.config.nvidia_vision_model,
                     "messages": messages,
                     "max_tokens": 4096,
-                    "temperature": 0.1,  # Low temp for consistent structured output
-                }
+                    "temperature": 0.1,
+                },
+                self._client.headers,
             )
             
-            if response.status_code == 200:
+            if response and response.status_code == 200:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                parsed = self._parse_vision_response(content, "analyze")
+                parsed = self._parse_vision_json(content)
                 
                 if "error" not in parsed:
-                    parsed["model_type"] = self._model_type
-                return parsed
-            else:
-                return {"error": f"API error: {response.status_code} - {response.text}", "elements": [], "model_type": self._model_type}
+                    return ScreenAnalysis(
+                        description=parsed.get("description", "No description"),
+                        elements=parsed.get("elements", []),
+                        text_content=parsed.get("text_content", ""),
+                        suggested_actions=parsed.get("suggested_actions", []),
+                        app_type=parsed.get("app_type", "unknown"),
+                        model_type="nvidia_nim",
+                        screenshot_dimensions=parsed.get("screenshot_dimensions", {}),
+                    )
+            
+            return ScreenAnalysis(
+                description=f"Analysis failed: {response.text if response else 'No response'}",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="nvidia_nim",
+                screenshot_dimensions={},
+            )
                 
         except Exception as e:
-            logger.error(f"Screen analysis failed: {e}")
-            return {"error": str(e), "elements": [], "model_type": self._model_type}
+            logger.error(f"NVIDIA screen analysis failed: {e}")
+            return ScreenAnalysis(
+                description=f"Error: {str(e)}",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="nvidia_nim",
+                screenshot_dimensions={},
+            )
     
-    async def find_elements(
+    async def get_next_action(
         self,
         screenshot_base64: str,
-        description: str,
-        confidence_threshold: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
-        """Find GUI elements matching a natural language description."""
+        current_task: str,
+        previous_actions: List[str] = None,
+    ) -> VisionAction:
+        """Get next action from NVIDIA vision model."""
         if not self._initialized:
             await self.initialize()
         
         if not self._initialized:
-            return []
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning="NVIDIA vision provider not initialized",
+                confidence=0.0,
+            )
         
         try:
-            prompt = self._build_vision_prompt(description, "find")
+            prompt = self._build_action_prompt(current_task, previous_actions or [])
             
             messages = [
                 {
@@ -434,56 +624,42 @@ Return ONLY valid JSON:
                 }
             ]
             
-            response = await self._client.post(
+            response = await self._make_request_with_retry(
                 "/chat/completions",
-                json={
-                    "model": self.config.vision_model,
+                {
+                    "model": self.config.nvidia_vision_model,
                     "messages": messages,
                     "max_tokens": 2048,
                     "temperature": 0.1,
-                }
+                },
+                self._client.headers,
             )
             
-            if response.status_code == 200:
+            if response and response.status_code == 200:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                parsed = self._parse_vision_response(content, "find")
+                parsed = self._parse_vision_json(content)
                 
-                elements = parsed.get("elements", [])
-                threshold = confidence_threshold or self.config.confidence_threshold
-                
-                # Filter by confidence
-                filtered = [e for e in elements if e.get("confidence", 0) >= threshold]
-                return filtered[:self.config.max_elements]
-            else:
-                return []
+                if "error" not in parsed:
+                    return VisionAction.from_dict(parsed)
+            
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning=f"API error: {response.text if response else 'No response'}",
+                confidence=0.0,
+            )
                 
         except Exception as e:
-            logger.error(f"Element finding failed: {e}")
-            return []
-    
-    async def get_element_at(
-        self,
-        screenshot_base64: str,
-        x: int,
-        y: int,
-    ) -> Optional[Dict[str, Any]]:
-        """Get the GUI element at specific screen coordinates."""
-        # Find all elements and check which one contains the coordinates
-        elements = await self.find_elements(screenshot_base64, "all interactive elements")
-        
-        for elem in elements:
-            bbox = elem.get("bbox", {})
-            if (bbox.get("left", 0) <= x <= bbox.get("left", 0) + bbox.get("width", 0) and
-                bbox.get("top", 0) <= y <= bbox.get("top", 0) + bbox.get("height", 0)):
-                return elem
-        
-        return None
-    
-    async def describe_screen(self, screenshot_base64: str) -> str:
-        """Get a natural language description of the screen."""
-        result = await self.analyze_screen(screenshot_base64, "Describe this screen in detail for automation")
-        return result.get("description", "Unable to describe screen")
+            logger.error(f"NVIDIA next action prediction failed: {e}")
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning=str(e),
+                confidence=0.0,
+            )
     
     async def verify_action(
         self,
@@ -491,15 +667,15 @@ Return ONLY valid JSON:
         after_screenshot: str,
         expected_change: str,
     ) -> Dict[str, Any]:
-        """Verify that an action produced the expected visual change."""
+        """Verify action using NVIDIA vision model."""
         if not self._initialized:
             await self.initialize()
         
         if not self._initialized:
-            return {"verified": False, "confidence": 0.0, "error": "Vision provider not initialized"}
+            return {"verified": False, "confidence": 0.0, "error": "NVIDIA vision provider not initialized"}
         
         try:
-            prompt = self._build_vision_prompt(expected_change, "verify")
+            prompt = self._build_verification_prompt(expected_change)
             
             messages = [
                 {
@@ -513,117 +689,580 @@ Return ONLY valid JSON:
                 }
             ]
             
-            response = await self._client.post(
+            response = await self._make_request_with_retry(
                 "/chat/completions",
-                json={
-                    "model": self.config.vision_model,
+                {
+                    "model": self.config.nvidia_vision_model,
                     "messages": messages,
                     "max_tokens": 1024,
                     "temperature": 0.1,
+                },
+                self._client.headers,
+            )
+            
+            if response and response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = self._parse_vision_json(content)
+                return parsed
+            
+            return {"verified": False, "confidence": 0.0, "error": f"API error: {response.text if response else 'No response'}"}
+                
+        except Exception as e:
+            logger.error(f"NVIDIA action verification failed: {e}")
+            return {"verified": False, "confidence": 0.0, "error": str(e)}
+
+
+class GeminiVisionProvider(BaseVisionProvider):
+    """Google Gemini Vision Provider for image understanding."""
+    
+    @property
+    def provider_type_name(self) -> VisionProviderType:
+        return VisionProviderType.GEMINI
+    
+    async def initialize(self) -> None:
+        """Initialize the Gemini vision provider."""
+        if self._initialized:
+            return
+        
+        api_key = self.config.gemini_api_key or settings.gemini_api_key
+        if not api_key:
+            logger.warning("Gemini API key not configured - Gemini vision provider disabled")
+            self._initialized = False
+            return
+        
+        base_url = self.config.gemini_base_url or settings.gemini_base_url
+        if not base_url.endswith("/v1beta"):
+            base_url = base_url.rstrip("/") + "/v1beta"
+        
+        try:
+            self._client = httpx.AsyncClient(
+                base_url=base_url,
+                headers={
+                    "x-goog-api-key": api_key,
+                    "Content-Type": "application/json",
+                },
+                timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
+            )
+            
+            # Test connection
+            test_response = await self._client.post(
+                f"/models/{self.config.gemini_vision_model}:generateContent",
+                json={
+                    "contents": [{"parts": [{"text": "test"}]}],
+                    "generationConfig": {"maxOutputTokens": 10},
+                }
+            )
+            
+            if test_response.status_code == 200:
+                self._initialized = True
+                logger.info(f"Gemini vision provider initialized with model: {self.config.gemini_vision_model}")
+            else:
+                logger.warning(f"Gemini vision API test failed: {test_response.status_code} - {test_response.text}")
+                self._initialized = False
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize Gemini vision provider: {e}")
+            self._initialized = False
+    
+    async def health_check(self) -> ProviderHealth:
+        """Check provider health."""
+        if not self._initialized:
+            return ProviderHealth(
+                healthy=False,
+                error="Gemini API key not configured or initialization failed",
+                model_count=0,
+            )
+        
+        try:
+            response = await self._client.post(
+                f"/models/{self.config.gemini_vision_model}:generateContent",
+                json={
+                    "contents": [{"parts": [{"text": "ping"}]}],
+                    "generationConfig": {"maxOutputTokens": 5},
                 }
             )
             
             if response.status_code == 200:
-                data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                parsed = self._parse_vision_response(content, "verify")
-                return parsed
+                return ProviderHealth(
+                    healthy=True,
+                    latency_ms=150.0,
+                    model_count=1,
+                )
             else:
-                return {"verified": False, "confidence": 0.0, "error": f"API error: {response.status_code}"}
+                return ProviderHealth(
+                    healthy=False,
+                    error=f"API returned {response.status_code}",
+                    model_count=0,
+                )
+        except Exception as e:
+            return ProviderHealth(
+                healthy=False,
+                error=str(e),
+                model_count=0,
+            )
+    
+    async def list_models(self) -> List[ModelInfo]:
+        """List available models."""
+        if not self._initialized:
+            return []
+        
+        return [ModelInfo(
+            id=self.config.gemini_vision_model,
+            name=f"Gemini Vision ({self.config.gemini_vision_model})",
+            description="GUI element detection and screen understanding via Google Gemini",
+            capabilities={"vision": True, "gui_detection": True, "chat": True},
+            max_context_length=4096,
+        )]
+    
+    def _gemini_payload(self, prompt: str, image_base64: str, max_tokens: int = 4096) -> Dict[str, Any]:
+        """Build Gemini API payload with image."""
+        return {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": image_base64
+                        }
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": 0.1,
+            }
+        }
+    
+    async def _gemini_request(self, endpoint: str, payload: Dict[str, Any]) -> Optional[httpx.Response]:
+        """Make request to Gemini API."""
+        return await self._make_request_with_retry(endpoint, payload, self._client.headers)
+    
+    def _parse_gemini_response(self, response: httpx.Response) -> Dict[str, Any]:
+        """Parse Gemini response."""
+        try:
+            data = response.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                content = candidates[0].get("content", {})
+                parts = content.get("parts", [])
+                if parts:
+                    text = parts[0].get("text", "")
+                    return self._parse_vision_json(text)
+            return {"error": "No content in response"}
+        except Exception as e:
+            logger.error(f"Failed to parse Gemini response: {e}")
+            return {"error": str(e)}
+    
+    async def analyze_screen(
+        self,
+        screenshot_base64: str,
+        task_description: str = "",
+        region: Optional[Dict[str, int]] = None,
+    ) -> ScreenAnalysis:
+        """Analyze a screenshot using Gemini vision model."""
+        if not self._initialized:
+            await self.initialize()
+        
+        if not self._initialized:
+            return ScreenAnalysis(
+                description="Cannot analyze screen: Gemini vision provider not available",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="gemini",
+                screenshot_dimensions={},
+            )
+        
+        try:
+            prompt = self._build_analysis_prompt(task_description)
+            payload = self._gemini_payload(prompt, screenshot_base64, max_tokens=4096)
+            
+            response = await self._gemini_request(
+                f"/models/{self.config.gemini_vision_model}:generateContent",
+                payload,
+            )
+            
+            if response and response.status_code == 200:
+                parsed = self._parse_gemini_response(response)
+                
+                if "error" not in parsed:
+                    return ScreenAnalysis(
+                        description=parsed.get("description", "No description"),
+                        elements=parsed.get("elements", []),
+                        text_content=parsed.get("text_content", ""),
+                        suggested_actions=parsed.get("suggested_actions", []),
+                        app_type=parsed.get("app_type", "unknown"),
+                        model_type="gemini",
+                        screenshot_dimensions=parsed.get("screenshot_dimensions", {}),
+                    )
+            
+            return ScreenAnalysis(
+                description=f"Analysis failed: {response.text if response else 'No response'}",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="gemini",
+                screenshot_dimensions={},
+            )
                 
         except Exception as e:
-            logger.error(f"Action verification failed: {e}")
-            return {"verified": False, "confidence": 0.0, "error": str(e)}
+            logger.error(f"Gemini screen analysis failed: {e}")
+            return ScreenAnalysis(
+                description=f"Error: {str(e)}",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="gemini",
+                screenshot_dimensions={},
+            )
     
     async def get_next_action(
         self,
         screenshot_base64: str,
         current_task: str,
         previous_actions: List[str] = None,
-    ) -> Dict[str, Any]:
-        """Get the next recommended action for automation based on current screen state.
-        
-        This is the key method for the 'vision-guided automation' approach:
-        1. Take screenshot
-        2. Send to vision model with task context
-        3. Model returns specific action to take
-        4. Execute action
-        5. Repeat until task complete
-        """
+    ) -> VisionAction:
+        """Get next action from Gemini vision model."""
         if not self._initialized:
             await self.initialize()
         
         if not self._initialized:
-            return {"action": "error", "reason": "Vision provider not initialized"}
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning="Gemini vision provider not initialized",
+                confidence=0.0,
+            )
         
         try:
-            prev = "\n".join(previous_actions) if previous_actions else "None"
+            prompt = self._build_action_prompt(current_task, previous_actions or [])
+            payload = self._gemini_payload(prompt, screenshot_base64, max_tokens=2048)
             
-            prompt = f"""You are a GUI automation agent. Given the current screen and task, decide the next action.
-
-Task: {current_task}
-Previous actions: {prev}
-
-Return ONLY valid JSON:
-{{
-  "action": "click|type|hotkey|wait|scroll|navigate|complete|error",
-  "target": "element description or coordinates",
-  "params": {{"text": "...", "keys": [...], "x": 0, "y": 0}},
-  "reasoning": "why this action",
-  "confidence": 0.0-1.0,
-  "is_complete": true/false
-}}"""
-            
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{screenshot_base64}",
-                                "detail": "high"
-                            }
-                        }
-                    ]
-                }
-            ]
-            
-            response = await self._client.post(
-                "/chat/completions",
-                json={
-                    "model": self.config.vision_model,
-                    "messages": messages,
-                    "max_tokens": 1024,
-                    "temperature": 0.1,
-                }
+            response = await self._gemini_request(
+                f"/models/{self.config.gemini_vision_model}:generateContent",
+                payload,
             )
             
-            if response.status_code == 200:
-                data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                parsed = self._parse_vision_response(content, "analyze")
-                return parsed
-            else:
-                return {"action": "error", "reason": f"API error: {response.status_code}"}
+            if response and response.status_code == 200:
+                parsed = self._parse_gemini_response(response)
+                
+                if "error" not in parsed:
+                    return VisionAction.from_dict(parsed)
+            
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning=f"API error: {response.text if response else 'No response'}",
+                confidence=0.0,
+            )
                 
         except Exception as e:
-            logger.error(f"Next action prediction failed: {e}")
-            return {"action": "error", "reason": str(e)}
+            logger.error(f"Gemini next action prediction failed: {e}")
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning=str(e),
+                confidence=0.0,
+            )
+    
+    async def verify_action(
+        self,
+        before_screenshot: str,
+        after_screenshot: str,
+        expected_change: str,
+    ) -> Dict[str, Any]:
+        """Verify action using Gemini vision model."""
+        if not self._initialized:
+            await self.initialize()
+        
+        if not self._initialized:
+            return {"verified": False, "confidence": 0.0, "error": "Gemini vision provider not initialized"}
+        
+        try:
+            prompt = self._build_verification_prompt(expected_change)
+            
+            # For verification, we need to send both images
+            # Gemini supports multiple inline_data parts
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"text": f"BEFORE screenshot: {prompt}"},
+                        {"inline_data": {"mime_type": "image/png", "data": before_screenshot}},
+                        {"text": "AFTER screenshot:"},
+                        {"inline_data": {"mime_type": "image/png", "data": after_screenshot}},
+                    ]
+                }],
+                "generationConfig": {
+                    "maxOutputTokens": 1024,
+                    "temperature": 0.1,
+                }
+            }
+            
+            response = await self._gemini_request(
+                f"/models/{self.config.gemini_vision_model}:generateContent",
+                payload,
+            )
+            
+            if response and response.status_code == 200:
+                parsed = self._parse_gemini_response(response)
+                return parsed
+            
+            return {"verified": False, "confidence": 0.0, "error": f"API error: {response.text if response else 'No response'}"}
+                
+        except Exception as e:
+            logger.error(f"Gemini action verification failed: {e}")
+            return {"verified": False, "confidence": 0.0, "error": str(e)}
 
 
-# Factory function for easy instantiation
-async def create_vision_provider(config: Optional[VisionConfig] = None) -> VisionModelProvider:
-    """Create and initialize a vision model provider."""
-    provider = VisionModelProvider(config)
-    await provider.initialize()
-    return provider
+class VisionProviderFactory:
+    """Factory for creating and managing vision providers with fallback."""
+    
+    def __init__(self, config: Optional[VisionConfig] = None):
+        self.config = config or VisionConfig()
+        self._providers: Dict[VisionProviderType, BaseVisionProvider] = {}
+        self._current_provider: Optional[BaseVisionProvider] = None
+        self._initialized = False
+    
+    def _create_provider(self, provider_type: VisionProviderType) -> BaseVisionProvider:
+        """Create a vision provider instance."""
+        if provider_type == VisionProviderType.NVIDIA_NIM:
+            return NVIDIANIMVisionProvider(self.config)
+        elif provider_type == VisionProviderType.GEMINI:
+            return GeminiVisionProvider(self.config)
+        else:
+            raise ValueError(f"Unknown vision provider type: {provider_type}")
+    
+    async def initialize(self) -> None:
+        """Initialize all providers and select the best available one."""
+        if self._initialized:
+            return
+        
+        # Create providers in priority order
+        provider_order = [self.config.primary_provider] + self.config.fallback_providers
+        seen = set()
+        
+        for ptype in provider_order:
+            if ptype in seen:
+                continue
+            seen.add(ptype)
+            
+            provider = self._create_provider(ptype)
+            self._providers[ptype] = provider
+            await provider.initialize()
+            
+            if provider._initialized:
+                if self._current_provider is None:
+                    self._current_provider = provider
+                    logger.info(f"Selected vision provider: {provider.provider_name}")
+        
+        if self._current_provider is None:
+            logger.warning("No vision providers available - visual intelligence disabled")
+        else:
+            logger.info(f"Active vision provider: {self._current_provider.provider_name}")
+        
+        self._initialized = True
+    
+    async def get_provider(self, provider_type: Optional[VisionProviderType] = None) -> Optional[BaseVisionProvider]:
+        """Get a specific provider or the current active one."""
+        if not self._initialized:
+            await self.initialize()
+        
+        if provider_type:
+            return self._providers.get(provider_type)
+        
+        return self._current_provider
+    
+    async def switch_provider(self, provider_type: VisionProviderType) -> bool:
+        """Switch to a different vision provider."""
+        if provider_type not in self._providers:
+            return False
+        
+        provider = self._providers[provider_type]
+        if not provider._initialized:
+            await provider.initialize()
+        
+        if provider._initialized:
+            self._current_provider = provider
+            logger.info(f"Switched to vision provider: {provider.provider_name}")
+            return True
+        
+        return False
+    
+    async def analyze_screen(
+        self,
+        screenshot_base64: str,
+        task_description: str = "",
+        region: Optional[Dict[str, int]] = None,
+        provider_type: Optional[VisionProviderType] = None,
+    ) -> ScreenAnalysis:
+        """Analyze screen using current or specified provider with automatic fallback."""
+        if not self._initialized:
+            await self.initialize()
+        
+        if self._current_provider is None:
+            return ScreenAnalysis(
+                description="No vision providers available",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="none",
+                screenshot_dimensions={},
+            )
+        
+        # Try specified provider or current provider
+        providers_to_try = []
+        if provider_type and provider_type in self._providers:
+            providers_to_try.append(self._providers[provider_type])
+        
+        if self._current_provider and self._current_provider not in providers_to_try:
+            providers_to_try.append(self._current_provider)
+        
+        # Add fallback providers
+        for ptype in self.config.fallback_providers:
+            if ptype in self._providers and self._providers[ptype] not in providers_to_try:
+                providers_to_try.append(self._providers[ptype])
+        
+        last_error = None
+        for provider in providers_to_try:
+            try:
+                result = await provider.analyze_screen(screenshot_base64, task_description, region)
+                if result and "error" not in result.to_dict():
+                    if provider != self._current_provider:
+                        self._current_provider = provider
+                        logger.info(f"Fallback to vision provider: {provider.provider_name}")
+                    return result
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Vision provider {provider.provider_name} failed: {e}")
+        
+        return ScreenAnalysis(
+            description=f"All vision providers failed: {last_error}",
+            elements=[],
+            text_content="",
+            suggested_actions=[],
+            app_type="unknown",
+            model_type="none",
+            screenshot_dimensions={},
+        )
+    
+    async def get_next_action(
+        self,
+        screenshot_base64: str,
+        current_task: str,
+        previous_actions: List[str] = None,
+        provider_type: Optional[VisionProviderType] = None,
+    ) -> VisionAction:
+        """Get next action using current or specified provider with fallback."""
+        if not self._initialized:
+            await self.initialize()
+        
+        if self._current_provider is None:
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning="No vision providers available",
+                confidence=0.0,
+            )
+        
+        providers_to_try = []
+        if provider_type and provider_type in self._providers:
+            providers_to_try.append(self._providers[provider_type])
+        
+        if self._current_provider and self._current_provider not in providers_to_try:
+            providers_to_try.append(self._current_provider)
+        
+        for ptype in self.config.fallback_providers:
+            if ptype in self._providers and self._providers[ptype] not in providers_to_try:
+                providers_to_try.append(self._providers[ptype])
+        
+        last_error = None
+        for provider in providers_to_try:
+            try:
+                result = await provider.get_next_action(screenshot_base64, current_task, previous_actions)
+                if result and result.action != "error":
+                    if provider != self._current_provider:
+                        self._current_provider = provider
+                    return result
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Vision provider {provider.provider_name} action failed: {e}")
+        
+        return VisionAction(
+            action="error",
+            target="",
+            params={},
+            reasoning=f"All vision providers failed: {last_error}",
+            confidence=0.0,
+        )
+    
+    async def verify_action(
+        self,
+        before_screenshot: str,
+        after_screenshot: str,
+        expected_change: str,
+        provider_type: Optional[VisionProviderType] = None,
+    ) -> Dict[str, Any]:
+        """Verify action using current or specified provider with fallback."""
+        if not self._initialized:
+            await self.initialize()
+        
+        if self._current_provider is None:
+            return {"verified": False, "confidence": 0.0, "error": "No vision providers available"}
+        
+        providers_to_try = []
+        if provider_type and provider_type in self._providers:
+            providers_to_try.append(self._providers[provider_type])
+        
+        if self._current_provider and self._current_provider not in providers_to_try:
+            providers_to_try.append(self._current_provider)
+        
+        for ptype in self.config.fallback_providers:
+            if ptype in self._providers and self._providers[ptype] not in providers_to_try:
+                providers_to_try.append(self._providers[ptype])
+        
+        for provider in providers_to_try:
+            try:
+                result = await provider.verify_action(before_screenshot, after_screenshot, expected_change)
+                if result and result.get("verified") is not None:
+                    return result
+            except Exception as e:
+                logger.warning(f"Vision provider {provider.provider_name} verification failed: {e}")
+        
+        return {"verified": False, "confidence": 0.0, "error": "All vision providers failed"}
+
+
+# Global factory instance
+_vision_factory: Optional[VisionProviderFactory] = None
+
+
+async def get_vision_factory(config: Optional[VisionConfig] = None) -> VisionProviderFactory:
+    """Get or create the global vision provider factory."""
+    global _vision_factory
+    if _vision_factory is None:
+        _vision_factory = VisionProviderFactory(config)
+        await _vision_factory.initialize()
+    return _vision_factory
 
 
 # Export
 __all__ = [
-    "VisionModelProvider",
+    "VisionProviderType",
     "VisionConfig",
-    "create_vision_provider",
+    "VisionAction",
+    "ScreenAnalysis",
+    "BaseVisionProvider",
+    "NVIDIANIMVisionProvider",
+    "GeminiVisionProvider",
+    "VisionProviderFactory",
+    "get_vision_factory",
 ]

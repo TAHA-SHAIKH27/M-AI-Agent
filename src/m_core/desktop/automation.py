@@ -8,9 +8,11 @@ Provides a unified, application-agnostic interface for Windows desktop automatio
 - UI Automation for accessible controls
 - Visual verification (OCR, screenshots, text search)
 - State observation and verification
+- Screenshot-first visual intelligence (NVIDIA NIM + Gemini)
 """
 
 import asyncio
+import base64
 import logging
 import time
 from dataclasses import dataclass, field
@@ -22,6 +24,10 @@ from enum import Enum
 from m_core.tools import tool_registry
 from m_core.common_schemas import ToolExecutionContext
 from m_core.security import consent_manager, ConsentScope
+from m_core.model_providers.vision_provider import (
+    get_vision_factory, VisionConfig, VisionAction, ScreenAnalysis,
+    VisionProviderType
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +105,9 @@ class DesktopAutomation:
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self._screenshot_count = 0
         self._initialized = False
+        # Visual intelligence
+        self._vision_factory = None
+        self._vision_config = VisionConfig()
     
     async def initialize(self) -> None:
         """Initialize the automation engine.
@@ -111,6 +120,16 @@ class DesktopAutomation:
         
         self._initialized = True
         logger.info("DesktopAutomation initialized (permissions require explicit consent)")
+        
+        # Initialize vision factory for screenshot-first visual intelligence
+        try:
+            self._vision_factory = await get_vision_factory(self._vision_config)
+            if self._vision_factory._current_provider:
+                logger.info(f"Visual intelligence enabled: {self._vision_factory._current_provider.provider_name}")
+            else:
+                logger.warning("Visual intelligence disabled: no vision providers available")
+        except Exception as e:
+            logger.warning(f"Failed to initialize visual intelligence: {e}")
     
     def _get_correlation_id(self, prefix: str = "auto") -> str:
         """Generate a correlation ID for tracking."""
@@ -1373,6 +1392,417 @@ class DesktopAutomation:
                 "expected": expected
             }
         )
+    
+    # ============================================================
+    # SCREENSHOT-FIRST VISUAL INTELLIGENCE
+    # ============================================================
+    
+    async def capture_screenshot_base64(self, mode: str = "full", window_title: str = None) -> Optional[str]:
+        """Capture screenshot and return as base64 string for vision analysis."""
+        self._screenshot_count += 1
+        name = f"screenshot_{self._screenshot_count}_{int(time.time())}.png"
+        path = self.evidence_dir / name
+        
+        result = await self._execute_tool("screen_capture", {
+            "mode": mode, "output_format": "png", "save_to_file": True,
+            "window_title": window_title
+        }, ["screen:capture"])
+        
+        if result["success"] and "image_path" in result["result"]:
+            import shutil
+            shutil.copy2(result["result"]["image_path"], path)
+            
+            # Read and encode as base64
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        return None
+    
+    async def capture_window_screenshot(self, window_title: str) -> Optional[str]:
+        """Capture screenshot of a specific window."""
+        return await self.capture_screenshot_base64(mode="window", window_title=window_title)
+    
+    async def analyze_screen(
+        self,
+        task_description: str = "",
+        window_title: str = None,
+        provider_type: Optional[VisionProviderType] = None,
+    ) -> ScreenAnalysis:
+        """
+        Analyze current screen using vision model.
+        
+        This is the primary method for understanding desktop state.
+        Captures screenshot, sends to vision model, returns structured analysis.
+        
+        Args:
+            task_description: Context about what we're looking for
+            window_title: Optional specific window to analyze
+            provider_type: Force specific vision provider
+            
+        Returns:
+            ScreenAnalysis with elements, text, suggested actions, app type
+        """
+        if not self._vision_factory:
+            return ScreenAnalysis(
+                description="Visual intelligence not initialized",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="none",
+                screenshot_dimensions={},
+            )
+        
+        # Capture screenshot
+        screenshot = await self.capture_screenshot_base64(mode="window" if window_title else "full", window_title=window_title)
+        if not screenshot:
+            return ScreenAnalysis(
+                description="Failed to capture screenshot",
+                elements=[],
+                text_content="",
+                suggested_actions=[],
+                app_type="unknown",
+                model_type="none",
+                screenshot_dimensions={},
+            )
+        
+        # Analyze with vision model
+        return await self._vision_factory.analyze_screen(
+            screenshot_base64=screenshot,
+            task_description=task_description,
+            provider_type=provider_type,
+        )
+    
+    async def get_next_action(
+        self,
+        current_task: str,
+        previous_actions: List[str] = None,
+        window_title: str = None,
+        provider_type: Optional[VisionProviderType] = None,
+    ) -> VisionAction:
+        """
+        Get the next recommended action from vision model.
+        
+        Implements the core vision-guided automation loop:
+        1. Capture screenshot
+        2. Send to vision model with task context
+        3. Model returns specific action to take
+        
+        Args:
+            current_task: High-level task description
+            previous_actions: History of actions taken
+            window_title: Optional specific window
+            provider_type: Force specific vision provider
+            
+        Returns:
+            VisionAction with action type, target, params, reasoning, confidence
+        """
+        if not self._vision_factory:
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning="Visual intelligence not initialized",
+                confidence=0.0,
+            )
+        
+        # Capture screenshot
+        screenshot = await self.capture_screenshot_base64(mode="window" if window_title else "full", window_title=window_title)
+        if not screenshot:
+            return VisionAction(
+                action="error",
+                target="",
+                params={},
+                reasoning="Failed to capture screenshot",
+                confidence=0.0,
+            )
+        
+        # Get action from vision model
+        return await self._vision_factory.get_next_action(
+            screenshot_base64=screenshot,
+            current_task=current_task,
+            previous_actions=previous_actions,
+            provider_type=provider_type,
+        )
+    
+    async def execute_vision_action(self, action: VisionAction) -> InteractionResult:
+        """
+        Execute a vision-recommended action through Windows automation engine.
+        
+        Validates action, checks permissions, executes via existing automation tools.
+        Never executes arbitrary code from vision model.
+        
+        Args:
+            action: VisionAction from vision model
+            
+        Returns:
+            InteractionResult with success status
+        """
+        if action.action == "error":
+            return InteractionResult(
+                success=False,
+                method_used=InteractionMethod.MOUSE_KEYBOARD,
+                error=action.reasoning,
+            )
+        
+        # Validate coordinates if present
+        if action.params.get("x") is not None or action.params.get("y") is not None:
+            x = action.params.get("x", 0)
+            y = action.params.get("y", 0)
+            # Basic bounds check (will be refined per screen resolution)
+            if x < 0 or y < 0 or x > 7680 or y > 4320:  # 8K max
+                return InteractionResult(
+                    success=False,
+                    method_used=InteractionMethod.MOUSE_KEYBOARD,
+                    error=f"Coordinates out of bounds: ({x}, {y})",
+                )
+        
+        # Execute action based on type
+        try:
+            if action.action == "click":
+                x = action.params.get("x")
+                y = action.params.get("y")
+                if x is not None and y is not None:
+                    result = await self._execute_tool("mouse_control", {
+                        "action": "click", "x": x, "y": y, "button": "left"
+                    }, ["automation:input"])
+                else:
+                    # Click on element by description (would need element finding)
+                    result = await self._execute_tool("mouse_control", {
+                        "action": "click", "x": 0, "y": 0, "button": "left"
+                    }, ["automation:input"])
+                    return InteractionResult(
+                        success=False,
+                        method_used=InteractionMethod.MOUSE_KEYBOARD,
+                        error="Click requires x,y coordinates from vision model",
+                    )
+            
+            elif action.action == "type":
+                text = action.params.get("text", "")
+                if text:
+                    result = await self._execute_tool("keyboard_input", {
+                        "action": "type", "text": text
+                    }, ["automation:input"])
+                else:
+                    return InteractionResult(
+                        success=False,
+                        method_used=InteractionMethod.MOUSE_KEYBOARD,
+                        error="Type action requires text parameter",
+                    )
+            
+            elif action.action == "hotkey":
+                keys = action.params.get("keys", [])
+                if keys:
+                    result = await self._execute_tool("keyboard_input", {
+                        "action": "press", "keys": keys
+                    }, ["automation:input"])
+                else:
+                    return InteractionResult(
+                        success=False,
+                        method_used=InteractionMethod.MOUSE_KEYBOARD,
+                        error="Hotkey action requires keys parameter",
+                    )
+            
+            elif action.action == "wait":
+                await asyncio.sleep(action.params.get("duration", 1.0))
+                return InteractionResult(
+                    success=True,
+                    method_used=InteractionMethod.MOUSE_KEYBOARD,
+                    details={"waited": action.params.get("duration", 1.0)},
+                )
+            
+            elif action.action == "scroll":
+                direction = action.params.get("direction", "down")
+                amount = action.params.get("amount", 3)
+                result = await self._execute_tool("mouse_control", {
+                    "action": "scroll", "direction": direction, "amount": amount
+                }, ["automation:input"])
+            
+            elif action.action == "navigate":
+                # Navigate to URL or path
+                url = action.params.get("url", "")
+                if url:
+                    result = await self._execute_tool("keyboard_input", {
+                        "action": "hotkey", "keys": ["ctrl", "l"]
+                    }, ["automation:input"])
+                    await asyncio.sleep(0.3)
+                    result = await self._execute_tool("keyboard_input", {
+                        "action": "type", "text": url
+                    }, ["automation:input"])
+                    await asyncio.sleep(0.3)
+                    result = await self._execute_tool("keyboard_input", {
+                        "action": "press", "keys": ["enter"]
+                    }, ["automation:input"])
+                else:
+                    return InteractionResult(
+                        success=False,
+                        method_used=InteractionMethod.MOUSE_KEYBOARD,
+                        error="Navigate action requires url parameter",
+                    )
+            
+            elif action.action == "complete":
+                return InteractionResult(
+                    success=True,
+                    method_used=InteractionMethod.MOUSE_KEYBOARD,
+                    details={"completed": True, "reasoning": action.reasoning},
+                    verification_passed=True,
+                )
+            
+            else:
+                return InteractionResult(
+                    success=False,
+                    method_used=InteractionMethod.MOUSE_KEYBOARD,
+                    error=f"Unknown action: {action.action}",
+                )
+            
+            return InteractionResult(
+                success=result.get("success", False),
+                method_used=InteractionMethod.MOUSE_KEYBOARD,
+                details=result.get("result", {}),
+                error=result.get("error"),
+            )
+            
+        except Exception as e:
+            logger.error(f"Vision action execution failed: {e}")
+            return InteractionResult(
+                success=False,
+                method_used=InteractionMethod.MOUSE_KEYBOARD,
+                error=str(e),
+            )
+    
+    async def verify_action_result_visual(
+        self,
+        before_screenshot: str,
+        expected_change: str,
+        window_title: str = None,
+        provider_type: Optional[VisionProviderType] = None,
+    ) -> Dict[str, Any]:
+        """
+        Verify action result using vision model comparison.
+        
+        Captures new screenshot, compares with before screenshot using vision model.
+        
+        Args:
+            before_screenshot: Base64 screenshot before action
+            expected_change: Description of expected visual change
+            window_title: Optional specific window
+            provider_type: Force specific vision provider
+            
+        Returns:
+            Dict with verified (bool), confidence, reasoning
+        """
+        if not self._vision_factory:
+            return {"verified": False, "confidence": 0.0, "error": "Visual intelligence not initialized"}
+        
+        # Capture after screenshot
+        after_screenshot = await self.capture_screenshot_base64(mode="window" if window_title else "full", window_title=window_title)
+        if not after_screenshot:
+            return {"verified": False, "confidence": 0.0, "error": "Failed to capture after screenshot"}
+        
+        # Verify with vision model
+        return await self._vision_factory.verify_action(
+            before_screenshot=before_screenshot,
+            after_screenshot=after_screenshot,
+            expected_change=expected_change,
+            provider_type=provider_type,
+        )
+    
+    async def run_vision_guided_task(
+        self,
+        task: str,
+        max_steps: int = 20,
+        window_title: str = None,
+        provider_type: Optional[VisionProviderType] = None,
+        verification_threshold: float = 0.7,
+    ) -> Dict[str, Any]:
+        """
+        Run a complete vision-guided automation task.
+        
+        Implements the continuous visual feedback loop:
+        SCREENSHOT → VISION ANALYSIS → ACTION PLAN → VALIDATION → ACTION → NEW SCREENSHOT → VERIFICATION
+        
+        Args:
+            task: High-level task description
+            max_steps: Maximum number of action steps
+            window_title: Optional specific window
+            provider_type: Force specific vision provider
+            verification_threshold: Minimum confidence to accept verification
+            
+        Returns:
+            Dict with success, steps_taken, final_state, actions_history
+        """
+        if not self._vision_factory or not self._vision_factory._current_provider:
+            return {"success": False, "error": "Visual intelligence not available"}
+        
+        actions_history = []
+        previous_actions = []
+        
+        for step in range(max_steps):
+            logger.info(f"Vision-guided task step {step + 1}/{max_steps}: {task}")
+            
+            # 1. Capture screenshot and analyze
+            analysis = await self.analyze_screen(task, window_title, provider_type)
+            if "error" in analysis.to_dict():
+                return {"success": False, "error": analysis.to_dict().get("error"), "steps": step}
+            
+            # 2. Get next action from vision model
+            action = await self.get_next_action(task, previous_actions, window_title, provider_type)
+            actions_history.append(action.to_dict())
+            
+            if action.action == "error":
+                return {"success": False, "error": action.reasoning, "steps": step, "actions": actions_history}
+            
+            if action.action == "complete":
+                return {
+                    "success": True,
+                    "completed": True,
+                    "steps": step + 1,
+                    "actions": actions_history,
+                    "final_reasoning": action.reasoning,
+                }
+            
+            # 3. Capture before screenshot for verification
+            before_screenshot = await self.capture_screenshot_base64(mode="window" if window_title else "full", window_title=window_title)
+            
+            # 4. Execute action through Windows automation
+            execute_result = await self.execute_vision_action(action)
+            previous_actions.append(f"{action.action}: {action.target} ({action.reasoning})")
+            
+            if not execute_result.success:
+                # Action failed, try to recover
+                logger.warning(f"Action failed: {execute_result.error}, attempting recovery")
+                # Could implement recovery logic here
+                continue
+            
+            # 5. Wait for UI to update
+            await asyncio.sleep(1.0)
+            
+            # 6. Verify result
+            verification = await self.verify_action_result_visual(
+                before_screenshot=before_screenshot,
+                expected_change=action.expected_result or action.reasoning,
+                window_title=window_title,
+                provider_type=provider_type,
+            )
+            
+            if verification.get("verified") and verification.get("confidence", 0) >= verification_threshold:
+                logger.info(f"Step {step + 1} verified: {verification.get('reasoning')}")
+                if action.is_complete:
+                    return {
+                        "success": True,
+                        "completed": True,
+                        "steps": step + 1,
+                        "actions": actions_history,
+                    }
+            else:
+                logger.warning(f"Step {step + 1} verification failed or low confidence: {verification}")
+                # Could implement retry/recovery here
+        
+        return {
+            "success": False,
+            "error": f"Max steps ({max_steps}) reached",
+            "steps": max_steps,
+            "actions": actions_history,
+        }
     
     # ============================================================
     # Helpers

@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     anthropic_base_url: str = "https://api.anthropic.com/v1"
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     
+    # Vision Providers (for screenshot-based visual intelligence)
+    # NVIDIA NIM vision models (NVLM, Nemotron-3V, etc.)
+    nvidia_vision_model: str = "nvidia/nv-embed-v1"  # Will use actual vision model when available
+    nvidia_vision_base_url: str = "https://integrate.api.nvidia.com/v1"
+    
+    # Google Gemini API (fallback vision)
+    gemini_api_key: Optional[str] = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_vision_model: str = "gemini-1.5-flash"
+    
     # Memory
     memory_stm_ttl_seconds: int = 3600
     memory_episodic_db: str = "sqlite:///data/memory/episodic.db"

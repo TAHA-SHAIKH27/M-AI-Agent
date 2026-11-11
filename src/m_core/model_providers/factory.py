@@ -10,7 +10,7 @@ from .ollama import OllamaProvider
 from .lm_studio import LMStudioProvider
 from .openai_provider import OpenAIProvider
 from .anthropic import AnthropicProvider
-from .vision_provider import VisionModelProvider, VisionConfig
+from .vision_provider import VisionProviderFactory as VisionProviderFactoryNew, VisionConfig
 from ..config import settings
 from ..core.exceptions import ProviderError
 from ..utils.logging import get_logger
@@ -23,7 +23,7 @@ class ProviderFactory:
     
     def __init__(self):
         self._providers: List[ModelProvider] = []
-        self._vision_provider: Optional[VisionModelProvider] = None
+        self._vision_factory = None  # New vision provider factory
         self._initialized = False
         # Initialize providers synchronously at creation
         self._initialize_sync()
@@ -39,23 +39,20 @@ class ProviderFactory:
             else:
                 logger.warning("NVIDIA API key not configured - Nemotron unavailable")
             
-            # 2. Vision Provider (for GUI understanding)
-            self._vision_provider = VisionModelProvider()
-            # Initialize vision provider synchronously
+            # 2. Vision Provider Factory (for GUI understanding) - new vision system
             try:
                 # Run async initialization in event loop
                 loop = asyncio.new_event_loop()
                 try:
-                    loop.run_until_complete(self._vision_provider.initialize())
+                    self._vision_factory = loop.run_until_complete(get_vision_factory())
+                    if self._vision_factory._current_provider:
+                        logger.info(f"Registered Vision Provider Factory: {self._vision_factory._current_provider.provider_name}")
+                    else:
+                        logger.warning("Vision Provider Factory registered but no providers available")
                 finally:
                     loop.close()
-                
-                if self._vision_provider._initialized:
-                    logger.info("Registered Vision Provider for GUI understanding")
-                else:
-                    logger.warning("Vision Provider registered but not initialized (OmniParser not available)")
             except Exception as e:
-                logger.warning(f"Failed to initialize Vision provider: {e}")
+                logger.warning(f"Failed to initialize Vision Provider Factory: {e}")
             
             # 3. Fallback: Ollama (local)
             ollama = OllamaProvider()
@@ -96,19 +93,9 @@ class ProviderFactory:
         # Already initialized in __init__
         pass
     
-    async def _ensure_initialized(self) -> None:
-        """Ensure providers are initialized (async version for compatibility)."""
-        # Already initialized in __init__
-        pass
-    
-    async def _initialize_providers(self) -> None:
-        """Initialize providers in priority order (async version for compatibility)."""
-        # Already initialized in __init__
-        pass
-    
-    async def get_vision_provider(self) -> Optional[VisionModelProvider]:
-        """Get the vision provider for GUI understanding, waiting for initialization."""
-        return self._vision_provider
+    async def get_vision_factory(self):
+        """Get the vision provider factory for GUI understanding."""
+        return self._vision_factory
     
     async def wait_for_initialization(self) -> None:
         """Wait for all providers to finish initialization."""
@@ -123,10 +110,7 @@ class ProviderFactory:
     
     def get_all_providers(self) -> List[ModelProvider]:
         """Get all providers including vision provider."""
-        providers = self._providers.copy()
-        if self._vision_provider:
-            providers.append(self._vision_provider)
-        return providers
+        return self._providers.copy()
     
     def get_provider(self, provider_id: str) -> Optional[ModelProvider]:
         # Check chat providers first
@@ -194,24 +178,27 @@ class ProviderFactory:
                     "name": provider.name,
                     "type": provider.type,
                 }
-        # Also check vision provider
-        if self._vision_provider:
+        # Also check vision provider factory
+        if self._vision_factory:
             try:
-                health = await self._vision_provider.health_check_cached(ttl_seconds=30.0)
-                results[self._vision_provider.id] = {
-                    "healthy": health.healthy,
-                    "latency_ms": health.latency_ms,
-                    "error": health.error,
-                    "model_count": health.model_count,
-                    "name": self._vision_provider.name,
-                    "type": self._vision_provider.type,
-                }
+                # Check the current active vision provider
+                provider = self._vision_factory._current_provider
+                if provider:
+                    health = await provider.health_check()
+                    results[provider.provider_id] = {
+                        "healthy": health.healthy,
+                        "latency_ms": health.latency_ms,
+                        "error": health.error,
+                        "model_count": health.model_count,
+                        "name": provider.provider_name,
+                        "type": provider.provider_type,
+                    }
             except Exception as e:
-                results[self._vision_provider.id] = {
+                results["vision-factory"] = {
                     "healthy": False,
                     "error": str(e),
-                    "name": self._vision_provider.name,
-                    "type": self._vision_provider.type,
+                    "name": "Vision Factory",
+                    "type": "cloud",
                 }
         return results
     
