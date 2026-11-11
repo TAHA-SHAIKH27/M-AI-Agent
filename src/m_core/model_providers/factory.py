@@ -1,4 +1,5 @@
 """Provider factory with fallback chain."""
+import asyncio
 import structlog
 from typing import List, Optional, AsyncIterator, Dict, Any
 
@@ -23,62 +24,95 @@ class ProviderFactory:
     def __init__(self):
         self._providers: List[ModelProvider] = []
         self._vision_provider: Optional[VisionModelProvider] = None
-        self._initialize_providers()
+        self._initialized = False
+        # Initialize providers synchronously at creation
+        self._initialize_sync()
     
-    def _initialize_providers(self) -> None:
-        """Initialize providers in priority order."""
-        
-        # 1. Primary: NVIDIA Nemotron 3 Ultra
+    def _initialize_sync(self) -> None:
+        """Synchronously initialize providers for immediate availability."""
         try:
+            # 1. Primary: NVIDIA Nemotron 3 Ultra
             nemotron = NVIDIANemotronProvider()
             if settings.nvidia_api_key:
                 self._providers.append(nemotron)
                 logger.info("Registered NVIDIA Nemotron 3 Ultra as primary provider")
             else:
                 logger.warning("NVIDIA API key not configured - Nemotron unavailable")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Nemotron provider: {e}")
-        
-        # 2. Vision Provider (for GUI understanding)
-        try:
+            
+            # 2. Vision Provider (for GUI understanding)
             self._vision_provider = VisionModelProvider()
-            logger.info("Registered Vision Provider for GUI understanding")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Vision provider: {e}")
-        
-        # 3. Fallback: Ollama (local)
-        try:
+            # Initialize vision provider synchronously
+            try:
+                # Run async initialization in event loop
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(self._vision_provider.initialize())
+                finally:
+                    loop.close()
+                
+                if self._vision_provider._initialized:
+                    logger.info("Registered Vision Provider for GUI understanding")
+                else:
+                    logger.warning("Vision Provider registered but not initialized (OmniParser not available)")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Vision provider: {e}")
+            
+            # 3. Fallback: Ollama (local)
             ollama = OllamaProvider()
             self._providers.append(ollama)
             logger.info("Registered Ollama as fallback provider")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Ollama provider: {e}")
-        
-        # 4. Fallback: LM Studio (local)
-        try:
+            
+            # 4. Fallback: LM Studio (local)
             lm_studio = LMStudioProvider()
             self._providers.append(lm_studio)
             logger.info("Registered LM Studio as fallback provider")
-        except Exception as e:
-            logger.warning(f"Failed to initialize LM Studio provider: {e}")
-        
-        # 5. Fallback: OpenAI (cloud)
-        try:
+            
+            # 5. Fallback: OpenAI (cloud)
             if settings.openai_api_key:
                 openai = OpenAIProvider()
                 self._providers.append(openai)
                 logger.info("Registered OpenAI as fallback provider")
-        except Exception as e:
-            logger.warning(f"Failed to initialize OpenAI provider: {e}")
-        
-        # 6. Fallback: Anthropic (cloud)
-        try:
+            
+            # 6. Fallback: Anthropic (cloud)
             if settings.anthropic_api_key:
                 anthropic = AnthropicProvider()
                 self._providers.append(anthropic)
                 logger.info("Registered Anthropic as fallback provider")
+            
+            self._initialized = True
+            logger.info(f"Provider factory initialized with {len(self._providers)} providers")
+        
         except Exception as e:
-            logger.warning(f"Failed to initialize Anthropic provider: {e}")
+            logger.error(f"Failed to initialize providers: {e}")
+            self._initialized = True  # Mark as initialized even on error to avoid retry loops
+    
+    async def _ensure_initialized(self) -> None:
+        """Ensure providers are initialized (async version for compatibility)."""
+        # Already initialized in __init__
+        pass
+    
+    async def _initialize_providers(self) -> None:
+        """Initialize providers in priority order (async version for compatibility)."""
+        # Already initialized in __init__
+        pass
+    
+    async def _ensure_initialized(self) -> None:
+        """Ensure providers are initialized (async version for compatibility)."""
+        # Already initialized in __init__
+        pass
+    
+    async def _initialize_providers(self) -> None:
+        """Initialize providers in priority order (async version for compatibility)."""
+        # Already initialized in __init__
+        pass
+    
+    async def get_vision_provider(self) -> Optional[VisionModelProvider]:
+        """Get the vision provider for GUI understanding, waiting for initialization."""
+        return self._vision_provider
+    
+    async def wait_for_initialization(self) -> None:
+        """Wait for all providers to finish initialization."""
+        pass
     
     @property
     def providers(self) -> List[ModelProvider]:
@@ -86,6 +120,13 @@ class ProviderFactory:
     
     def get_primary(self) -> Optional[ModelProvider]:
         return self._providers[0] if self._providers else None
+    
+    def get_all_providers(self) -> List[ModelProvider]:
+        """Get all providers including vision provider."""
+        providers = self._providers.copy()
+        if self._vision_provider:
+            providers.append(self._vision_provider)
+        return providers
     
     def get_provider(self, provider_id: str) -> Optional[ModelProvider]:
         # Check chat providers first
@@ -97,15 +138,9 @@ class ProviderFactory:
             return self._vision_provider
         return None
     
-    def get_vision_provider(self) -> Optional[VisionModelProvider]:
-        """Get the vision provider for GUI understanding."""
+    def get_vision_provider_sync(self) -> Optional[VisionModelProvider]:
+        """Get the vision provider synchronously."""
         return self._vision_provider
-    
-    def get_all_providers(self) -> List[ModelProvider]:
-        all_providers = self._providers.copy()
-        if self._vision_provider:
-            all_providers.append(self._vision_provider)
-        return all_providers
     
     async def complete_with_fallback(self, request: CompletionRequest) -> CompletionResponse:
         """Try providers in order until one succeeds."""

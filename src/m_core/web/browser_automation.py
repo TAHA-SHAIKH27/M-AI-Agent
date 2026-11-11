@@ -765,9 +765,7 @@ class BrowserAutomation:
         # Initialize vision provider for fallback
         try:
             from m_core.model_providers import provider_factory
-            self._vision_provider = provider_factory.get_vision_provider()
-            if self._vision_provider:
-                await self._vision_provider.initialize()
+            self._vision_provider = await provider_factory.get_vision_provider()
         except Exception as e:
             logger.warning(f"Vision provider not available: {e}")
     

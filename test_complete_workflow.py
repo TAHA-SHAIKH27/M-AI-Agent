@@ -64,6 +64,8 @@ async def test_complete_workflow():
     result = await auto.launch_application('notepad', wait_for_window=True, timeout=30)
     print(f'   Launch: {result.success}')
     notepad_window_title = "Untitled - Notepad"  # Default for new Notepad
+    notepad_hwnd = None
+    pid = None
     if result.success:
         pid = result.details.get('process_id')
         print(f'   PID: {pid}')
@@ -71,19 +73,13 @@ async def test_complete_workflow():
             w = result.details['window']
             print(f'   Window: "{w["title"]}" (HWND: {w["hwnd"]})')
             notepad_window_title = w["title"]
+            notepad_hwnd = w["hwnd"]
     
-    await asyncio.sleep(1)
+    # Wait for window to fully appear
+    await asyncio.sleep(2)
     
-    # Verify the launched window - use the one from launch result
-    tool = tool_registry.get_tool('window_list')
-    ctx = ToolExecutionContext(
-        tool_name='window_list', arguments={'filter_process': 'notepad'},
-        correlation_id='debug-window', user_id='test', permissions_granted=['app:control'],
-        consent_manager=consent_manager
-    )
-    result = await tool.execute(ctx)
-    print(f'   Notepad windows: {result.result.get("total", 0)}')
-    # Use the window title from our launch result, not from re-querying
+    # Verify the launched window - USE the title from launch result
+    # DO NOT re-query window_list as it may find stale windows
     print(f'   Using window title from launch: "{notepad_window_title}"')
     
     # ============================================================
@@ -104,9 +100,10 @@ async def test_complete_workflow():
         print(f'   _connect_window FAILED for title: "{notepad_window_title}"')
     
     # ============================================================
-    # Helper to get current Notepad window title (handles * prefix when modified)
+    # Helper to get current Notepad window title using PID from launch
     # ============================================================
     async def get_current_notepad_title():
+        # Use the PID from launch to find the correct window
         tool = tool_registry.get_tool('window_list')
         ctx = ToolExecutionContext(
             tool_name='window_list', arguments={'filter_process': 'notepad'},
@@ -116,15 +113,21 @@ async def test_complete_workflow():
         result = await tool.execute(ctx)
         if result.success and result.result['windows']:
             for w in result.result['windows']:
-                if w["is_visible"] and "notepad" in w["title"].lower():
+                # Match by PID from our launch to avoid stale windows
+                if w["is_visible"] and w["process_id"] == pid:
                     return w["title"]
         return notepad_window_title  # fallback
     
     # ============================================================
-    # Step 3: Focus Notepad window
+    # Step 3: Focus Notepad window using HWND (more reliable)
     # ============================================================
     print('\n3. Focusing Notepad...')
-    result = await auto.focus_window(notepad_window_title, verify=True)
+    # Get the HWND from the launch result
+    if notepad_hwnd:
+        print(f'   Using HWND: {notepad_hwnd}')
+        result = await auto.focus_window(notepad_hwnd, verify=True, is_hwnd=True)
+    else:
+        result = await auto.focus_window(notepad_window_title, verify=True)
     print(f'   Focus: {result.success}, Verified: {result.verification_passed}')
     if not result.success:
         print(f'   Error: {result.error}')
@@ -140,16 +143,19 @@ async def test_complete_workflow():
     # Step 3b: Open new tab in Notepad (click "+" button) to get fresh document
     # ============================================================
     print('\n3b. Opening new tab in Notepad (click "+" button)...')
-    new_tab_button = {"type": "Button", "title": "New tab", "index": 0}
-    result = await auto.ui_click(notepad_window_title, new_tab_button)
-    if not result.success:
-        # Try alternative title for the + button
-        new_tab_button = {"type": "Button", "title": "+", "index": 0}
+    # Use the new open_new_tab method with HWND
+    if result.details.get('window'):
+        hwnd = result.details['window']['hwnd']
+        result = await auto.open_new_tab_by_hwnd(hwnd)
+    else:
+        new_tab_button = {"type": "Button", "title": "New tab", "index": 0}
         result = await auto.ui_click(notepad_window_title, new_tab_button)
-    if not result.success:
-        # Try by class name for tab button
-        new_tab_button = {"type": "Button", "class_name": "TabButton", "index": 0}
-        result = await auto.ui_click(notepad_window_title, new_tab_button)
+        if not result.success:
+            new_tab_button = {"type": "Button", "title": "+", "index": 0}
+            result = await auto.ui_click(notepad_window_title, new_tab_button)
+        if not result.success:
+            new_tab_button = {"type": "Button", "class_name": "TabButton", "index": 0}
+            result = await auto.ui_click(notepad_window_title, new_tab_button)
     print(f'   New tab: {result.success}' if result.success else f'   New tab failed: {result.error}')
     
     # Re-detect window title after new tab (should be "Untitled - Notepad")
@@ -163,21 +169,6 @@ async def test_complete_workflow():
     # Step 4: Type text using UI Automation
     # ============================================================
     notepad_ctrl = {"type": "Document", "class_name": "RichEditD2DPT", "index": 0}
-    
-    # Helper to get current Notepad window title (handles * prefix when modified)
-    async def get_current_notepad_title():
-        tool = tool_registry.get_tool('window_list')
-        ctx = ToolExecutionContext(
-            tool_name='window_list', arguments={'filter_process': 'notepad'},
-            correlation_id='get-title', user_id='test', permissions_granted=['app:control'],
-            consent_manager=consent_manager
-        )
-        result = await tool.execute(ctx)
-        if result.success and result.result['windows']:
-            for w in result.result['windows']:
-                if w["is_visible"] and "notepad" in w["title"].lower():
-                    return w["title"]
-        return notepad_window_title  # fallback
     
     async def append_text_via_uia(window_title, text):
         # Get current text
@@ -249,26 +240,17 @@ async def test_complete_workflow():
         print(f'   Contains "{check}": {passed}')
     
     # ============================================================
-    # Step 9: Save file using the new save_file method (with fallback)
+    # Step 9: Save file using the new save_file_with_fallback method
     # ============================================================
     # Use the same filename generated at the start
-    print(f'\n9. Saving file as "{filename}" using save_file method...')
-    result = await auto.save_file(notepad_window_title, filename)
+    print(f'\n9. Saving file as "{filename}" using save_file_with_fallback...')
+    result = await auto.save_file_with_fallback(notepad_window_title, filename, process_name="notepad")
     print(f'   Save: {result.success}')
-    if not result.success:
-        print(f'   Primary save failed: {result.error}')
-        print(f'   Trying fallback save method (Alt+Shift+S with keyboard navigation)...')
-        
-        # Fallback: Use Alt+Shift+S for Save As, then keyboard navigation
-        result = await auto.save_file_fallback(notepad_window_title, filename)
-        print(f'   Fallback save: {result.success}')
-        if result.success:
-            print(f'   File saved to: {result.details.get("file_path")}')
-        else:
-            print(f'   Fallback save failed: {result.error}')
-            print(f'   Details: {result.details}')
-    else:
+    if result.success:
         print(f'   File saved to: {result.details.get("file_path")}')
+    else:
+        print(f'   Error: {result.error}')
+        print(f'   Details: {result.details}')
     
     # ============================================================
     # Step 10: Verify saved file
