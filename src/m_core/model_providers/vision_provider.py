@@ -550,7 +550,9 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
             
             if response and response.status_code == 200:
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                message = data["choices"][0]["message"]
+                # Handle reasoning models where content is in reasoning_content
+                content = message.get("content") or message.get("reasoning_content") or ""
                 parsed = self._parse_vision_json(content)
                 
                 if "error" not in parsed:
@@ -637,7 +639,9 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
             
             if response and response.status_code == 200:
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                message = data["choices"][0]["message"]
+                # Handle reasoning models where content is in reasoning_content
+                content = message.get("content") or message.get("reasoning_content") or ""
                 parsed = self._parse_vision_json(content)
                 
                 if "error" not in parsed:
@@ -702,7 +706,8 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
             
             if response and response.status_code == 200:
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                message = data["choices"][0]["message"]
+                content = message.get("content") or message.get("reasoning_content") or ""
                 parsed = self._parse_vision_json(content)
                 return parsed
             
