@@ -319,20 +319,46 @@ Return ONLY valid JSON:
         import re
         
         try:
-            # Find JSON in response (may have markdown code blocks)
+            # Strategy 1: Find JSON in markdown code blocks
             json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
             if json_match:
                 json_str = json_match.group(1)
-            else:
-                # Try to find JSON object directly
-                json_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    json_str = response_text
+                return json.loads(json_str)
             
-            data = json.loads(json_str)
-            return data
+            # Strategy 2: Find JSON object directly (greedy match)
+            json_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+            
+            # Strategy 3: Try to extract JSON from common patterns
+            # Look for description, elements, etc. patterns
+            lines = response_text.strip().split('\n')
+            json_lines = []
+            in_json = False
+            brace_count = 0
+            for line in lines:
+                if '{' in line and not in_json:
+                    in_json = True
+                if in_json:
+                    json_lines.append(line)
+                    brace_count += line.count('{') - line.count('}')
+                    if brace_count <= 0 and in_json:
+                        break
+            
+            if json_lines:
+                json_str = '\n'.join(json_lines)
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+            
+            # If all parsing fails, return error
+            return {"error": "Failed to parse response", "raw": response_text[:500]}
+            
         except Exception as e:
             logger.warning(f"Failed to parse vision response as JSON: {e}")
             return {"error": "Failed to parse response", "raw": response_text[:500]}
@@ -519,7 +545,15 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
             )
         
         try:
-            prompt = self._build_analysis_prompt(task_description)
+            # Get actual screenshot dimensions
+            import base64
+            import io
+            from PIL import Image
+            image_data = base64.b64decode(screenshot_base64)
+            image = Image.open(io.BytesIO(image_data))
+            img_width, img_height = image.size
+            
+            prompt = self._build_analysis_prompt(task_description) + f"\n\nIMPORTANT: Return bounding boxes in ACTUAL PIXEL coordinates (not normalized). The screenshot is {img_width}x{img_height} pixels. Use format: {{\"left\": x, \"top\": y, \"width\": w, \"height\": h}} where x,y,w,h are pixel values."
             
             messages = [
                 {
@@ -542,7 +576,7 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
                 {
                     "model": self.config.nvidia_vision_model,
                     "messages": messages,
-                    "max_tokens": 4096,
+                    "max_tokens": 8192,
                     "temperature": 0.1,
                 },
                 self._client.headers,
@@ -556,14 +590,29 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
                 parsed = self._parse_vision_json(content)
                 
                 if "error" not in parsed:
+                    # Convert any normalized coordinates to pixel coordinates
+                    elements = parsed.get("elements", [])
+                    for elem in elements:
+                        bbox = elem.get("bbox", {})
+                        # Check if coordinates appear normalized (0-1000 range)
+                        if bbox and bbox.get("left", 0) <= 1000 and bbox.get("top", 0) <= 1000:
+                            # Convert from normalized (0-1000) to actual pixels
+                            bbox["left"] = int(bbox["left"] * img_width / 1000)
+                            bbox["top"] = int(bbox["top"] * img_height / 1000)
+                            bbox["width"] = int(bbox["width"] * img_width / 1000)
+                            bbox["height"] = int(bbox["height"] * img_height / 1000)
+                            bbox["right"] = bbox["left"] + bbox["width"]
+                            bbox["bottom"] = bbox["top"] + bbox["height"]
+                            elem["bbox"] = bbox
+                    
                     return ScreenAnalysis(
                         description=parsed.get("description", "No description"),
-                        elements=parsed.get("elements", []),
+                        elements=elements,
                         text_content=parsed.get("text_content", ""),
                         suggested_actions=parsed.get("suggested_actions", []),
                         app_type=parsed.get("app_type", "unknown"),
                         model_type="nvidia_nim",
-                        screenshot_dimensions=parsed.get("screenshot_dimensions", {}),
+                        screenshot_dimensions={"width": img_width, "height": img_height},
                     )
             
             return ScreenAnalysis(
@@ -883,7 +932,7 @@ class GeminiVisionProvider(BaseVisionProvider):
         
         try:
             prompt = self._build_analysis_prompt(task_description)
-            payload = self._gemini_payload(prompt, screenshot_base64, max_tokens=4096)
+            payload = self._gemini_payload(prompt, screenshot_base64, max_tokens=8192)
             
             response = await self._gemini_request(
                 f"/models/{self.config.gemini_vision_model}:generateContent",
