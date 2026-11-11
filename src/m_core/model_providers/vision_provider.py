@@ -1,8 +1,12 @@
 """Vision model provider for GUI understanding and visual grounding.
 
-This provider uses a proper GUI element detection pipeline.
-OmniParser is the primary model for GUI element detection with bounding boxes.
-If unavailable, it reports unavailability clearly rather than using captioning models.
+This provider uses NVIDIA's cloud vision API (Nemotron or NVLM models) for:
+- GUI element detection with bounding boxes
+- Visual grounding (finding elements by description)
+- Screen understanding (describing what's on screen)
+- Element classification (button, input, text, etc.)
+- Action verification (before/after screenshot comparison)
+- Next action recommendations for automation
 """
 import asyncio
 import base64
@@ -12,12 +16,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass
 
+import httpx
+
 from m_core.common_schemas import (
     CompletionRequest, ChatMessage, MessageRole, ToolSchema, ToolFunction,
     CompletionResponse, StreamChunk, ModelCapability, ModelInfo,
     EmbeddingRequest, EmbeddingResponse, ProviderHealth,
 )
 from .base import ModelProvider
+from ..config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -25,39 +32,41 @@ logger = structlog.get_logger(__name__)
 @dataclass
 class VisionConfig:
     """Configuration for vision model provider."""
-    model_id: str = "microsoft/omniparser-v2"
-    device: str = "auto"  # auto, cpu, cuda
+    model_id: str = "nvidia/nv-embed-v1"  # Will use vision model from NVIDIA
+    device: str = "auto"  # cloud only
     confidence_threshold: float = 0.3
     max_elements: int = 50
     screenshot_scale: float = 1.0
-    # OmniParser specific
-    use_omniparser: bool = True
-    omniparser_model_path: Optional[str] = None
+    # NVIDIA API specific
+    nvidia_api_key: Optional[str] = None
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    vision_model: str = "nvidia/nv-embed-v1"  # Vision-capable model
 
 
 class VisionModelProvider(ModelProvider):
-    """Vision model provider for GUI understanding and visual grounding.
+    """Vision model provider using NVIDIA Cloud API for GUI understanding.
     
     Supports:
-    - OmniParser for GUI element detection (primary)
+    - GUI element detection with bounding boxes via NVIDIA vision models
     - Visual grounding (finding elements by description)
     - Screen understanding (describing what's on screen)
     - Element classification (button, input, text, etc.)
     - Action verification (before/after screenshot comparison)
-    
-    NOTE: This provider requires a proper GUI detection model (OmniParser).
-    Captioning models (Florence-2, BLIP, GIT) are NOT suitable fallbacks
-    as they produce image captions, not GUI element bounding boxes.
+    - Next action recommendations for desktop automation
     """
     
     def __init__(self, config: Optional[VisionConfig] = None):
         self.config = config or VisionConfig()
-        self._model = None
-        self._processor = None
+        # Override with settings if available
+        if settings.nvidia_api_key:
+            self.config.nvidia_api_key = settings.nvidia_api_key
+        if settings.nvidia_base_url:
+            self.config.nvidia_base_url = settings.nvidia_base_url.rstrip("/")
+            if not self.config.nvidia_base_url.endswith("/v1"):
+                self.config.nvidia_base_url += "/v1"
         self._initialized = False
-        self._device = None
-        self._model_type = "unknown"  # "omniparser" or "captioning"
-        self._health_cache: Optional[ProviderHealth] = None
+        self._client: Optional[httpx.AsyncClient] = None
+        self._model_type = "nvidia-cloud"
     
     @property
     def provider_id(self) -> str:
@@ -65,117 +74,105 @@ class VisionModelProvider(ModelProvider):
     
     @property
     def provider_name(self) -> str:
-        return "Vision GUI Understanding"
+        return "NVIDIA Vision GUI Understanding"
     
     @property
     def provider_type(self) -> str:
-        return "local"
+        return "cloud"
     
     @property
     def capabilities(self) -> ModelCapability:
         return ModelCapability(
-            chat=False,  # Not a chat model
+            chat=True,  # Can do chat with vision
             streaming=False,
-            function_calling=False,
-            vision=True,  # Vision capability for GUI understanding
-            reasoning=False,
+            function_calling=True,
+            vision=True,
+            reasoning=True,
             max_context_tokens=4096,
             supported_languages=["en"],
         )
     
     async def initialize(self) -> None:
-        """Initialize the vision model."""
+        """Initialize the vision model via NVIDIA API."""
         if self._initialized:
             return
         
+        if not self.config.nvidia_api_key:
+            logger.warning("NVIDIA API key not configured - Vision provider disabled")
+            self._initialized = False
+            return
+        
         try:
-            import torch
-            from transformers import AutoModel, AutoProcessor
+            self._client = httpx.AsyncClient(
+                base_url=self.config.nvidia_base_url,
+                headers={
+                    "Authorization": f"Bearer {self.config.nvidia_api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=httpx.Timeout(120.0, connect=10.0),
+            )
             
-            # Determine device
-            if self.config.device == "auto":
-                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            # Test connection with a simple request
+            test_response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.vision_model,
+                    "messages": [
+                        {"role": "user", "content": "test"}
+                    ],
+                    "max_tokens": 10,
+                }
+            )
+            
+            if test_response.status_code == 200:
+                self._initialized = True
+                logger.info(f"Vision provider initialized with NVIDIA model: {self.config.vision_model}")
             else:
-                self._device = self.config.device
-            
-            logger.info(f"Loading vision model on {self._device}")
-            
-            # Try to load OmniParser if configured
-            if self.config.use_omniparser:
-                try:
-                    await self._load_omniparser()
-                    self._model_type = "omniparser"
-                    self._initialized = True
-                    logger.info("Vision model provider initialized with OmniParser")
-                    return
-                except Exception as e:
-                    logger.warning(f"Could not load OmniParser: {e}")
-            
-            # If OmniParser not available, explicitly report unavailability
-            # DO NOT fall back to captioning models - they don't detect GUI elements
-            logger.error("No GUI detection model available. Vision provider disabled.")
-            logger.error("Install OmniParser or configure a compatible GUI detection model.")
-            self._initialized = False
-            self._model_type = "unavailable"
-            
-        except ImportError:
-            logger.warning("Transformers/torch not available. Vision provider disabled.")
-            self._initialized = False
+                logger.warning(f"NVIDIA API test failed: {test_response.status_code} - {test_response.text}")
+                self._initialized = False
+                
         except Exception as e:
-            logger.error(f"Failed to initialize vision model: {e}")
+            logger.error(f"Failed to initialize vision provider: {e}")
             self._initialized = False
     
-    async def _load_omniparser(self) -> None:
-        """Load the OmniParser model for GUI element detection."""
-        import torch
-        from transformers import AutoModel, AutoProcessor
-        
-        model_id = self.config.omniparser_model_path or self.config.model_id
-        
-        logger.info(f"Loading OmniParser model: {model_id}")
-        
-        # OmniParser uses a specific architecture - typically a fine-tuned
-        # Florence-2 or similar model with detection head
-        # The actual OmniParser model from Microsoft has specific requirements
-        try:
-            self._model = AutoModel.from_pretrained(
-                model_id,
-                torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
-                device_map=self._device,
-                trust_remote_code=True,
-            )
-            self._processor = AutoProcessor.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-            )
-            logger.info(f"Successfully loaded OmniParser model: {model_id}")
-        except Exception as e:
-            logger.error(f"Failed to load OmniParser: {e}")
-            raise
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
     
     async def health_check(self) -> ProviderHealth:
         """Check provider health."""
         if not self._initialized:
             return ProviderHealth(
                 healthy=False,
-                error="Vision model not initialized. OmniParser required for GUI detection.",
-                model_count=0,
-            )
-        
-        if self._model_type != "omniparser":
-            return ProviderHealth(
-                healthy=False,
-                error=f"Model type '{self._model_type}' does not support GUI element detection",
+                error="NVIDIA API key not configured or initialization failed",
                 model_count=0,
             )
         
         try:
-            import torch
-            return ProviderHealth(
-                healthy=True,
-                latency_ms=100.0,
-                model_count=1,
+            # Quick health check
+            response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.vision_model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 5,
+                }
             )
+            
+            if response.status_code == 200:
+                return ProviderHealth(
+                    healthy=True,
+                    latency_ms=100.0,
+                    model_count=1,
+                )
+            else:
+                return ProviderHealth(
+                    healthy=False,
+                    error=f"API returned {response.status_code}",
+                    model_count=0,
+                )
         except Exception as e:
             return ProviderHealth(
                 healthy=False,
@@ -189,28 +186,82 @@ class VisionModelProvider(ModelProvider):
             return []
         
         return [ModelInfo(
-            id=self.config.model_id,
-            name=f"Vision GUI Detection ({self._model_type})",
-            description="GUI element detection model for desktop automation",
-            capabilities={"vision": True, "gui_detection": True},
+            id=self.config.vision_model,
+            name=f"NVIDIA Vision GUI Detection",
+            description="GUI element detection and screen understanding via NVIDIA Cloud API",
+            capabilities={"vision": True, "gui_detection": True, "chat": True},
             max_context_length=4096,
         )]
     
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
-        """Not supported - vision provider is for GUI analysis only."""
-        return CompletionResponse(
-            id="vision-not-supported",
-            model=self.config.model_id,
-            content="Vision provider does not support direct chat. Use analyze_screen() or find_elements() instead.",
-            finish_reason="error",
-        )
+        """Complete chat with vision support."""
+        if not self._initialized:
+            return CompletionResponse(
+                id="vision-not-initialized",
+                model=self.config.vision_model,
+                content="Vision provider not initialized. NVIDIA API key required.",
+                finish_reason="error",
+            )
+        
+        try:
+            # Build messages with images if present
+            messages = []
+            for msg in request.messages:
+                if msg.role == "user" and msg.content:
+                    content = msg.content
+                    # Check if content has images (vision)
+                    if isinstance(content, list):
+                        # Already structured with images
+                        messages.append({"role": "user", "content": content})
+                    else:
+                        messages.append({"role": msg.role, "content": content})
+                else:
+                    messages.append({"role": msg.role, "content": msg.content})
+            
+            response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.vision_model,
+                    "messages": messages,
+                    "max_tokens": request.max_tokens or 4096,
+                    "temperature": request.temperature or 0.7,
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                return CompletionResponse(
+                    id=data.get("id", "vision-complete"),
+                    model=self.config.vision_model,
+                    content=content,
+                    finish_reason=data["choices"][0].get("finish_reason", "stop"),
+                    latency_ms=0,
+                )
+            else:
+                return CompletionResponse(
+                    id="vision-error",
+                    model=self.config.vision_model,
+                    content=f"API error: {response.status_code} - {response.text}",
+                    finish_reason="error",
+                )
+                
+        except Exception as e:
+            logger.error(f"Vision completion failed: {e}")
+            return CompletionResponse(
+                id="vision-error",
+                model=self.config.vision_model,
+                content=f"Error: {str(e)}",
+                finish_reason="error",
+            )
     
     async def stream(self, request: CompletionRequest):
-        """Not supported for vision provider."""
+        """Stream not fully supported for vision provider."""
+        response = await self.complete(request)
         yield StreamChunk(
-            id="vision-not-supported",
-            content="Vision provider does not support streaming chat.",
-            finish_reason="error",
+            id=response.id,
+            content=response.content,
+            finish_reason=response.finish_reason,
             is_final=True,
         )
     
@@ -219,12 +270,73 @@ class VisionModelProvider(ModelProvider):
         return EmbeddingResponse(
             object="list",
             data=[],
-            model=self.config.model_id,
+            model=self.config.vision_model,
         )
     
     # ============================================================
-    # VISION-SPECIFIC METHODS
+    # VISION-SPECIFIC METHODS FOR GUI AUTOMATION
     # ============================================================
+    
+    def _build_vision_prompt(self, task: str, mode: str = "analyze") -> str:
+        """Build specialized prompts for GUI automation tasks."""
+        prompts = {
+            "analyze": """You are a GUI automation expert. Analyze this screenshot and provide a structured JSON response.
+
+Return ONLY valid JSON with this exact structure:
+{
+  "description": "Brief description of what's on screen",
+  "elements": [
+    {"type": "button|input|text|link|menu|checkbox|radio|dropdown|tab|window|dialog|icon|image|unknown", "label": "visible text or aria-label", "description": "what this element does", "bbox": {"left": x, "top": y, "width": w, "height": h}, "confidence": 0.0-1.0}
+  ],
+  "text_content": "all visible text concatenated",
+  "suggested_actions": ["action 1", "action 2"],
+  "app_type": "notepad|word|excel|chrome|edge|explorer|terminal|unknown"
+}""",
+            "find": f"""You are a GUI automation expert. Find elements matching: "{task}"
+
+Return ONLY valid JSON:
+{{
+  "elements": [
+    {{"type": "button|input|text|link|menu|checkbox|radio|dropdown|tab|window|dialog|icon|image|unknown", "label": "visible text", "description": "what this element does", "bbox": {{"left": x, "top": y, "width": w, "height": h}}, "confidence": 0.0-1.0}}
+  ]
+}}""",
+            "verify": f"""You are a GUI automation expert. Compare these two screenshots and verify if the expected change occurred: "{task}"
+
+Return ONLY valid JSON:
+{{
+  "verified": true/false,
+  "confidence": 0.0-1.0,
+  "reasoning": "explanation of what changed",
+  "before_elements_count": N,
+  "after_elements_count": N
+}}""",
+        }
+        return prompts.get(mode, prompts["analyze"])
+    
+    def _parse_vision_response(self, response_text: str, mode: str = "analyze") -> Dict[str, Any]:
+        """Parse the vision model response into structured data."""
+        import json
+        import re
+        
+        # Try to extract JSON from response
+        try:
+            # Find JSON in response (may have markdown code blocks)
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try to find JSON object directly
+                json_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    json_str = response_text
+            
+            data = json.loads(json_str)
+            return data
+        except Exception as e:
+            logger.warning(f"Failed to parse vision response as JSON: {e}")
+            return {"error": "Failed to parse response", "raw": response_text}
     
     async def analyze_screen(
         self,
@@ -232,80 +344,60 @@ class VisionModelProvider(ModelProvider):
         task_description: str = "",
         region: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
-        """Analyze a screenshot and return structured GUI understanding.
-        
-        Args:
-            screenshot_base64: Base64 encoded screenshot
-            task_description: Optional task context for focused analysis
-            region: Optional region to analyze (left, top, width, height)
-            
-        Returns:
-            Dict with:
-            - description: Natural language description of screen
-            - elements: List of detected GUI elements with bounding boxes
-            - text_content: Extracted text from elements
-            - suggested_actions: Recommended next actions
-            - model_type: Type of model used ("omniparser" or "unavailable")
-        """
+        """Analyze a screenshot and return structured GUI understanding."""
         if not self._initialized:
             await self.initialize()
         
-        if not self._initialized or self._model_type != "omniparser":
+        if not self._initialized:
             return {
-                "error": "GUI detection model (OmniParser) not available",
+                "error": "Vision provider not initialized. NVIDIA API key required.",
                 "elements": [],
                 "model_type": self._model_type,
-                "description": "Cannot analyze screen: No GUI detection model loaded"
+                "description": "Cannot analyze screen: Vision provider not available"
             }
         
         try:
-            import torch
-            from PIL import Image
+            # Build prompt with task context
+            prompt = self._build_vision_prompt(task_description, "analyze")
             
-            # Decode screenshot
-            image_data = base64.b64decode(screenshot_base64)
-            image = Image.open(io.BytesIO(image_data))
+            # Prepare message with image
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_base64}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ]
             
-            # Crop to region if specified
-            if region:
-                image = image.crop((
-                    region["left"], region["top"],
-                    region["left"] + region["width"],
-                    region["top"] + region["height"]
-                ))
+            response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.vision_model,
+                    "messages": messages,
+                    "max_tokens": 4096,
+                    "temperature": 0.1,  # Low temp for consistent structured output
+                }
+            )
             
-            # Process with OmniParser
-            # OmniParser typically uses a specific prompt format for GUI parsing
-            prompt = task_description or "Parse the GUI elements in this screenshot. Return bounding boxes, element types, and labels."
-            
-            inputs = self._processor(
-                images=image,
-                text=prompt,
-                return_tensors="pt",
-            ).to(self._device)
-            
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    num_beams=3,
-                    do_sample=False,
-                )
-            
-            # Parse outputs - OmniParser returns structured format
-            response = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
-            
-            # Parse OmniParser structured output
-            elements = self._parse_omniparser_output(response, image.size)
-            
-            return {
-                "description": f"Detected {len(elements)} GUI elements",
-                "elements": elements,
-                "text_content": self._extract_text(elements),
-                "suggested_actions": self._suggest_actions(elements, task_description),
-                "model_type": "omniparser",
-            }
-            
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = self._parse_vision_response(content, "analyze")
+                
+                if "error" not in parsed:
+                    parsed["model_type"] = self._model_type
+                return parsed
+            else:
+                return {"error": f"API error: {response.status_code} - {response.text}", "elements": [], "model_type": self._model_type}
+                
         except Exception as e:
             logger.error(f"Screen analysis failed: {e}")
             return {"error": str(e), "elements": [], "model_type": self._model_type}
@@ -316,62 +408,56 @@ class VisionModelProvider(ModelProvider):
         description: str,
         confidence_threshold: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """Find GUI elements matching a natural language description.
-        
-        Args:
-            screenshot_base64: Base64 encoded screenshot
-            description: Natural language description (e.g., "the save button", "search input field")
-            confidence_threshold: Minimum confidence threshold
-            
-        Returns:
-            List of matching elements with bounding boxes and confidence scores
-        """
+        """Find GUI elements matching a natural language description."""
         if not self._initialized:
             await self.initialize()
         
-        if not self._initialized or self._model_type != "omniparser":
-            logger.warning("find_elements called but GUI detection model not available")
+        if not self._initialized:
             return []
         
-        threshold = confidence_threshold or self.config.confidence_threshold
-        
         try:
-            import torch
-            from PIL import Image
+            prompt = self._build_vision_prompt(description, "find")
             
-            image_data = base64.b64decode(screenshot_base64)
-            image = Image.open(io.BytesIO(image_data))
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_base64}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ]
             
-            # First analyze the full screen to get all elements
-            # Then filter by description
-            prompt = f"Find all GUI elements. Target: {description}"
+            response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.vision_model,
+                    "messages": messages,
+                    "max_tokens": 2048,
+                    "temperature": 0.1,
+                }
+            )
             
-            inputs = self._processor(
-                images=image,
-                text=prompt,
-                return_tensors="pt",
-            ).to(self._device)
-            
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    num_beams=3,
-                )
-            
-            response = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
-            
-            elements = self._parse_omniparser_output(response, image.size)
-            
-            # Filter by confidence and relevance to description
-            filtered = []
-            for elem in elements:
-                if elem.get("confidence", 0) >= threshold:
-                    if self._matches_description(elem, description):
-                        filtered.append(elem)
-            
-            return filtered[:self.config.max_elements]
-            
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = self._parse_vision_response(content, "find")
+                
+                elements = parsed.get("elements", [])
+                threshold = confidence_threshold or self.config.confidence_threshold
+                
+                # Filter by confidence
+                filtered = [e for e in elements if e.get("confidence", 0) >= threshold]
+                return filtered[:self.config.max_elements]
+            else:
+                return []
+                
         except Exception as e:
             logger.error(f"Element finding failed: {e}")
             return []
@@ -383,26 +469,20 @@ class VisionModelProvider(ModelProvider):
         y: int,
     ) -> Optional[Dict[str, Any]]:
         """Get the GUI element at specific screen coordinates."""
-        if not self._initialized:
-            await self.initialize()
-        
-        if not self._initialized or self._model_type != "omniparser":
-            return None
-        
-        # Get all elements and find one at coordinates
+        # Find all elements and check which one contains the coordinates
         elements = await self.find_elements(screenshot_base64, "all interactive elements")
         
         for elem in elements:
             bbox = elem.get("bbox", {})
-            if (bbox.get("left", 0) <= x <= bbox.get("right", 0) and
-                bbox.get("top", 0) <= y <= bbox.get("bottom", 0)):
+            if (bbox.get("left", 0) <= x <= bbox.get("left", 0) + bbox.get("width", 0) and
+                bbox.get("top", 0) <= y <= bbox.get("top", 0) + bbox.get("height", 0)):
                 return elem
         
         return None
     
     async def describe_screen(self, screenshot_base64: str) -> str:
         """Get a natural language description of the screen."""
-        result = await self.analyze_screen(screenshot_base64, "Describe this screen in detail")
+        result = await self.analyze_screen(screenshot_base64, "Describe this screen in detail for automation")
         return result.get("description", "Unable to describe screen")
     
     async def verify_action(
@@ -411,230 +491,126 @@ class VisionModelProvider(ModelProvider):
         after_screenshot: str,
         expected_change: str,
     ) -> Dict[str, Any]:
-        """Verify that an action produced the expected visual change.
-        
-        Uses OmniParser to detect GUI state changes.
-        """
+        """Verify that an action produced the expected visual change."""
         if not self._initialized:
             await self.initialize()
         
-        if not self._initialized or self._model_type != "omniparser":
-            return {"verified": False, "confidence": 0.0, "error": "GUI detection model not available"}
+        if not self._initialized:
+            return {"verified": False, "confidence": 0.0, "error": "Vision provider not initialized"}
         
         try:
-            import torch
-            from PIL import Image
+            prompt = self._build_vision_prompt(expected_change, "verify")
             
-            before_img = Image.open(io.BytesIO(base64.b64decode(before_screenshot)))
-            after_img = Image.open(io.BytesIO(base64.b64decode(after_screenshot)))
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"BEFORE screenshot: {prompt}"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{before_screenshot}", "detail": "high"}},
+                        {"type": "text", "text": "AFTER screenshot:"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{after_screenshot}", "detail": "high"}},
+                    ]
+                }
+            ]
             
-            # Analyze both screenshots
-            before_elements = await self._get_elements_from_image(before_img)
-            after_elements = await self._get_elements_from_image(after_img)
-            
-            # Compare element states
-            verified, confidence, reasoning = self._compare_element_states(
-                before_elements, after_elements, expected_change
+            response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.vision_model,
+                    "messages": messages,
+                    "max_tokens": 1024,
+                    "temperature": 0.1,
+                }
             )
             
-            return {
-                "verified": verified,
-                "confidence": confidence,
-                "reasoning": reasoning,
-                "before_count": len(before_elements),
-                "after_count": len(after_elements),
-            }
-            
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = self._parse_vision_response(content, "verify")
+                return parsed
+            else:
+                return {"verified": False, "confidence": 0.0, "error": f"API error: {response.status_code}"}
+                
         except Exception as e:
             logger.error(f"Action verification failed: {e}")
             return {"verified": False, "confidence": 0.0, "error": str(e)}
     
-    async def _get_elements_from_image(self, image) -> List[Dict[str, Any]]:
-        """Extract elements from an image using the model."""
-        import torch
+    async def get_next_action(
+        self,
+        screenshot_base64: str,
+        current_task: str,
+        previous_actions: List[str] = None,
+    ) -> Dict[str, Any]:
+        """Get the next recommended action for automation based on current screen state.
         
-        prompt = "Parse all GUI elements with bounding boxes, types, and labels."
-        inputs = self._processor(
-            images=image,
-            text=prompt,
-            return_tensors="pt",
-        ).to(self._device)
-        
-        with torch.no_grad():
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=1024,
-                num_beams=3,
-                do_sample=False,
-            )
-        
-        response = self._processor.batch_decode(outputs, skip_special_tokens=True)[0]
-        return self._parse_omniparser_output(response, image.size)
-    
-    def _compare_element_states(
-        self, 
-        before: List[Dict[str, Any]], 
-        after: List[Dict[str, Any]], 
-        expected_change: str
-    ) -> tuple:
-        """Compare two element lists to verify expected change."""
-        # Simple heuristic comparison
-        before_count = len(before)
-        after_count = len(after)
-        
-        # Check if element count changed significantly
-        if "appear" in expected_change.lower() or "open" in expected_change.lower():
-            if after_count > before_count:
-                return True, 0.7, f"Element count increased: {before_count} -> {after_count}"
-        elif "disappear" in expected_change.lower() or "close" in expected_change.lower():
-            if after_count < before_count:
-                return True, 0.7, f"Element count decreased: {before_count} -> {after_count}"
-        elif "click" in expected_change.lower() or "press" in expected_change.lower():
-            # For clicks, look for state changes in buttons
-            return True, 0.5, "Click action assumed to change state"
-        
-        return False, 0.3, f"No significant change detected ({before_count} -> {after_count} elements)"
-    
-    # ============================================================
-    # OMNIPARSER OUTPUT PARSING
-    # ============================================================
-    
-    def _parse_omniparser_output(self, response: str, image_size: tuple) -> List[Dict[str, Any]]:
-        """Parse OmniParser structured output into elements.
-        
-        OmniParser returns output in a specific format with bounding boxes,
-        element types, and labels. This parser handles that format.
+        This is the key method for the 'vision-guided automation' approach:
+        1. Take screenshot
+        2. Send to vision model with task context
+        3. Model returns specific action to take
+        4. Execute action
+        5. Repeat until task complete
         """
-        elements = []
+        if not self._initialized:
+            await self.initialize()
         
-        # OmniParser typically outputs something like:
-        # "<bbox><x1><y1><x2><y2></bbox> <type>button</type> <label>Save</label>"
-        # or JSON-like structured output
+        if not self._initialized:
+            return {"action": "error", "reason": "Vision provider not initialized"}
         
-        import re
-        
-        # Try to parse the structured format used by OmniParser
-        # Format: [x1, y1, x2, y2] type label
-        pattern = r'\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]\s*(\w+)\s*(.*)'
-        matches = re.findall(pattern, response)
-        
-        if matches:
-            img_w, img_h = image_size
-            for match in matches:
-                x1, y1, x2, y2, elem_type, label = match
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                
-                # Normalize coordinates if needed (OmniParser may use normalized coords)
-                if x2 <= 1000 and y2 <= 1000 and (img_w > 1000 or img_h > 1000):
-                    # Likely normalized to 1000x1000
-                    x1 = int(x1 * img_w / 1000)
-                    y1 = int(y1 * img_h / 1000)
-                    x2 = int(x2 * img_w / 1000)
-                    y2 = int(y2 * img_h / 1000)
-                
-                elements.append({
-                    "type": elem_type.lower(),
-                    "label": label.strip() if label else "",
-                    "description": f"{elem_type}: {label}" if label else elem_type,
-                    "bbox": {
-                        "left": min(x1, x2),
-                        "top": min(y1, y2),
-                        "width": abs(x2 - x1),
-                        "height": abs(y2 - y1),
-                        "right": max(x1, x2),
-                        "bottom": max(y1, y2),
-                    },
-                    "confidence": 0.8,  # OmniParser typically high confidence
-                    "source": "omniparser",
-                })
-            return elements[:self.config.max_elements]
-        
-        # Fallback: Try alternative format (JSON)
         try:
-            import json
-            data = json.loads(response)
-            if isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict) and "bbox" in item:
-                        bbox = item["bbox"]
-                        if isinstance(bbox, list) and len(bbox) == 4:
-                            x1, y1, x2, y2 = bbox
-                            elements.append({
-                                "type": item.get("type", "unknown"),
-                                "label": item.get("label", ""),
-                                "description": item.get("description", f"{item.get('type', 'unknown')}: {item.get('label', '')}"),
-                                "bbox": {
-                                    "left": min(x1, x2),
-                                    "top": min(y1, y2),
-                                    "width": abs(x2 - x1),
-                                    "height": abs(y2 - y1),
-                                    "right": max(x1, x2),
-                                    "bottom": max(y1, y2),
-                                },
-                                "confidence": item.get("confidence", 0.7),
-                                "source": "omniparser",
-                            })
-                return elements[:self.config.max_elements]
-        except:
-            pass
-        
-        # If no structured output parsed, return empty (don't invent elements)
-        logger.warning("Could not parse OmniParser output into structured elements")
-        return []
-    
-    def _extract_text(self, elements: List[Dict[str, Any]]) -> str:
-        """Extract all text from elements."""
-        texts = []
-        for elem in elements:
-            label = elem.get("label", "")
-            if label:
-                texts.append(label)
-        return " ".join(texts)
-    
-    def _suggest_actions(self, elements: List[Dict[str, Any]], task: str) -> List[str]:
-        """Suggest next actions based on elements and task."""
-        actions = []
-        task_lower = task.lower()
-        
-        for elem in elements:
-            elem_type = elem.get("type", "unknown")
-            label = elem.get("label", "").lower()
+            prev = "\n".join(previous_actions) if previous_actions else "None"
             
-            if "save" in task_lower and elem_type == "button" and "save" in label:
-                actions.append(f"Click '{elem['label']}' button to save")
-            elif "click" in task_lower and elem_type == "button":
-                actions.append(f"Click '{elem['label']}' button")
-            elif "type" in task_lower and elem_type in ["input", "edit", "textbox"]:
-                actions.append(f"Type in '{elem['label']}' field")
-            elif "search" in task_lower and elem_type in ["input", "button"] and ("search" in label or "find" in label):
-                actions.append(f"Use '{elem['label']}' for search")
-        
-        if not actions:
-            actions = ["Analyze screen for next steps"]
-        
-        return actions
-    
-    def _matches_description(self, element: Dict[str, Any], description: str) -> bool:
-        """Check if element matches description."""
-        label = element.get("label", "").lower()
-        elem_type = element.get("type", "").lower()
-        target = description.lower()
-        
-        # Direct text match in label
-        if target in label:
-            return True
-        
-        # Type-based match
-        if target in elem_type:
-            return True
-        
-        # Keyword matching
-        target_words = set(target.split())
-        label_words = set(label.split())
-        if target_words & label_words:
-            return True
-        
-        return False
+            prompt = f"""You are a GUI automation agent. Given the current screen and task, decide the next action.
+
+Task: {current_task}
+Previous actions: {prev}
+
+Return ONLY valid JSON:
+{{
+  "action": "click|type|hotkey|wait|scroll|navigate|complete|error",
+  "target": "element description or coordinates",
+  "params": {{"text": "...", "keys": [...], "x": 0, "y": 0}},
+  "reasoning": "why this action",
+  "confidence": 0.0-1.0,
+  "is_complete": true/false
+}}"""
+            
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{screenshot_base64}",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ]
+            
+            response = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.config.vision_model,
+                    "messages": messages,
+                    "max_tokens": 1024,
+                    "temperature": 0.1,
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                parsed = self._parse_vision_response(content, "analyze")
+                return parsed
+            else:
+                return {"action": "error", "reason": f"API error: {response.status_code}"}
+                
+        except Exception as e:
+            logger.error(f"Next action prediction failed: {e}")
+            return {"action": "error", "reason": str(e)}
 
 
 # Factory function for easy instantiation
