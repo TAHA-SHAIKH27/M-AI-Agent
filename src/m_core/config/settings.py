@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     )
     
     # Application
-    debug: bool = True
+    debug: bool = False
     testing: bool = False
     app_name: str = "M"
     app_version: str = "0.1.0-dev"
