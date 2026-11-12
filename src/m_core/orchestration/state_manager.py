@@ -103,25 +103,38 @@ class ExecutionStateManager:
             await self._persist_subtask_records(context.task_id)
     
     async def _persist_execution_record(self, task_id: str) -> None:
-        """Persist execution record to disk."""
+        """Persist one execution record, or rewrite the complete index when task_id is empty."""
         try:
             exec_file = self.data_dir / "executions.json"
-            
-            # Load existing
             data = {}
             if exec_file.exists():
-                data = json.loads(exec_file.read_text(encoding="utf-8"))
-            
-            # Update
-            record = self._execution_records[task_id]
-            data[task_id] = self._record_to_dict(record)
-            
-            # Save
-            exec_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            
+                try:
+                    loaded = json.loads(exec_file.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        data = loaded
+                except (json.JSONDecodeError, OSError) as exc:
+                    logger.error(f"Failed to read execution index before update: {exc}")
+                    raise
+
+            if task_id:
+                record = self._execution_records.get(task_id)
+                if record is None:
+                    return
+                data[task_id] = self._record_to_dict(record)
+            else:
+                data = {
+                    current_id: self._record_to_dict(record)
+                    for current_id, record in self._execution_records.items()
+                }
+
+            exec_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = exec_file.with_suffix(exec_file.suffix + ".tmp")
+            temp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temp_file.replace(exec_file)
         except Exception as e:
             logger.error(f"Failed to persist execution record: {e}")
-    
+            raise
+
     async def _persist_subtask_records(self, task_id: str) -> None:
         """Persist subtask records to disk."""
         try:
