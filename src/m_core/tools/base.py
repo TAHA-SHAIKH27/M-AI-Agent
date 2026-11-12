@@ -348,7 +348,9 @@ class BaseTool(ABC):
             
             try:
                 # Apply timeout
-                timeout = self.get_timeout_seconds()
+                manifest_timeout = max(1, int(self.get_timeout_seconds()))
+                requested_timeout = max(1, int(context.timeout_seconds))
+                timeout = min(manifest_timeout, requested_timeout)
                 raw_result = await asyncio.wait_for(
                     self._execute_impl(ToolExecutionContext(
                         tool_name=context.tool_name,
@@ -358,11 +360,11 @@ class BaseTool(ABC):
                         permissions_granted=context.permissions_granted,
                         audit_logger=context.audit_logger,
                         consent_manager=context.consent_manager,
-                        timeout_seconds=context.timeout_seconds,
+                        timeout_seconds=timeout,
                         memory_manager=context.memory_manager,
                         model_provider_factory=context.model_provider_factory,
                     )),
-                    timeout=context.timeout_seconds
+                    timeout=timeout
                 )
                 
                 # Convert dict result to ToolResult if needed
