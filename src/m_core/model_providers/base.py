@@ -6,7 +6,7 @@ from typing import AsyncIterator, List, Optional, Dict, Any
 from .schemas import (
     CompletionRequest, CompletionResponse, StreamChunk,
     ModelInfo, ModelCapability, EmbeddingRequest, EmbeddingResponse,
-    ProviderHealth, ToolSchema, ChatMessage,
+    ProviderHealth, ToolSchema, ChatMessage, FinishReason,
 )
 
 logger = structlog.get_logger(__name__)
@@ -94,7 +94,7 @@ class ModelProvider(abc.ABC):
         latency_ms: float = 0.0,
     ) -> CompletionResponse:
         """Helper to create completion response."""
-        from .schemas import CompletionUsage, FinishReason
+        from .schemas import CompletionUsage
         
         usage_obj = None
         if usage:
@@ -126,8 +126,6 @@ class ModelProvider(abc.ABC):
         is_final: bool = False,
     ) -> StreamChunk:
         """Helper to create stream chunk."""
-        from .schemas import FinishReason
-        
         return StreamChunk(
             id=id,
             content=content,
