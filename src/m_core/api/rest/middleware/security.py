@@ -1,3 +1,4 @@
+import ipaddress
 """Security middleware for REST API."""
 import structlog
 from typing import Callable, Optional
@@ -96,24 +97,20 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         return response
     
     def _is_allowed_host(self, host: str) -> bool:
-        """Check if host is allowed."""
-        allowed = ["127.0.0.1", "localhost", "::1"]
-        
-        # Allow private network ranges
-        if host.startswith("10.") or host.startswith("192.168.") or host.startswith("172."):
-            # Check 172.16-172.31
-            parts = host.split(".")
-            if len(parts) >= 2 and parts[0] == "172":
-                try:
-                    second = int(parts[1])
-                    if 16 <= second <= 31:
-                        return True
-                except ValueError:
-                    pass
+        """Allow loopback and RFC1918/ULA client addresses only."""
+        allowed_names = {"localhost"}
+        if host in allowed_names:
             return True
-        
-        return host in allowed
-    
+        try:
+            address = ipaddress.ip_address(host.split("%", 1)[0])
+        except ValueError:
+            return False
+        if address.is_loopback:
+            return True
+        if isinstance(address, ipaddress.IPv4Address):
+            return address.is_private and not address.is_link_local
+        return address.is_private and not address.is_link_local
+
     def _check_rate_limit(self, client_host: str) -> bool:
         """Fast in-memory rate limiting."""
         import time
