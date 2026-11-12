@@ -327,67 +327,68 @@ Available Tools:
         try:
             data = json.loads(json_match.group())
             
+            raw_subtasks = data.get("subtasks", [])
+            if not isinstance(raw_subtasks, list):
+                raise ValueError("Plan 'subtasks' must be a list")
+
             subtasks = []
-            for s in data.get("subtasks", [])[:10]:  # Max 10 subtasks
-                # Validate dependencies
-                deps = s.get("dependencies", [])
-                
-                # Parse task_type safely - default to tool_use if invalid
-            task_type_str = s.get("task_type", "tool_use")
-            try:
-                task_type = TaskType(task_type_str)
-            except ValueError:
-                task_type = TaskType.TOOL_USE
-            
-            subtask = Subtask(
-                id=s.get("id", f"{task_id}-{len(subtasks)+1}"),
-                name=s.get("name", "Unnamed subtask"),
-                description=s.get("description", ""),
-                task_type=task_type,
-                assigned_agent=s.get("assigned_agent"),
-                assigned_tool=s.get("assigned_tool"),
-                dependencies=deps,
-                priority=int(s.get("priority", 5)),
-                estimated_duration_seconds=float(s.get("estimated_duration_seconds", 10.0)),
-                max_retries=int(s.get("max_retries", 2)),
-                timeout_seconds=float(s.get("timeout_seconds", 60.0)),
-                requires_approval=s.get("requires_approval", False),
-                approval_status=ApprovalStatus.PENDING if s.get("requires_approval", False) else ApprovalStatus.NOT_REQUIRED,
-            )
-            subtasks.append(subtask)
-            
-            # Validate dependencies - create new Subtask objects with filtered dependencies
-            subtask_ids = {s.id for s in subtasks}
+            seen_ids = set()
+            for index, item in enumerate(raw_subtasks[:10]):
+                if not isinstance(item, dict):
+                    raise ValueError(f"Subtask at index {index} must be an object")
+
+                subtask_id = str(item.get("id") or f"{task_id}-{index + 1}").strip()
+                if not subtask_id or subtask_id in seen_ids:
+                    raise ValueError(f"Missing or duplicate subtask id: {subtask_id!r}")
+                seen_ids.add(subtask_id)
+
+                deps = item.get("dependencies", [])
+                if not isinstance(deps, list) or any(not isinstance(dep, str) for dep in deps):
+                    raise ValueError(f"Invalid dependencies for subtask {subtask_id}")
+
+                try:
+                    task_type = TaskType(item.get("task_type", "tool_use"))
+                except (ValueError, TypeError):
+                    task_type = TaskType.TOOL_USE
+
+                requires_approval = bool(item.get("requires_approval", False))
+                subtasks.append(Subtask(
+                    id=subtask_id,
+                    name=str(item.get("name") or "Unnamed subtask"),
+                    description=str(item.get("description") or ""),
+                    task_type=task_type,
+                    assigned_agent=item.get("assigned_agent"),
+                    assigned_tool=item.get("assigned_tool"),
+                    dependencies=deps,
+                    priority=int(item.get("priority", 5)),
+                    estimated_duration_seconds=max(0.0, float(item.get("estimated_duration_seconds", 10.0))),
+                    max_retries=max(0, int(item.get("max_retries", 2))),
+                    timeout_seconds=max(0.1, float(item.get("timeout_seconds", 60.0))),
+                    requires_approval=requires_approval,
+                    approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
+                ))
+
+            if not subtasks:
+                return self._create_fallback_plan(task_id, analysis, original_request)
+
+            # Validate dependencies only after all IDs are known so forward
+            # references remain valid. Drop self/unknown references safely.
+            valid_ids = {subtask.id for subtask in subtasks}
             validated_subtasks = []
             for subtask in subtasks:
-                filtered_deps = [d for d in subtask.dependencies if d in subtask_ids]
+                filtered_deps = [
+                    dep for dep in subtask.dependencies
+                    if dep in valid_ids and dep != subtask.id
+                ]
                 if filtered_deps != subtask.dependencies:
-                    # Create new Subtask with filtered dependencies
-                    validated_subtasks.append(Subtask(
-                        id=subtask.id,
-                        name=subtask.name,
-                        description=subtask.description,
-                        task_type=subtask.task_type,
-                        assigned_agent=subtask.assigned_agent,
-                        assigned_tool=subtask.assigned_tool,
-                        dependencies=filtered_deps,
-                        priority=subtask.priority,
-                        estimated_duration_seconds=subtask.estimated_duration_seconds,
-                        max_retries=subtask.max_retries,
-                        timeout_seconds=subtask.timeout_seconds,
-                        requires_approval=subtask.requires_approval,
-                        approval_status=subtask.approval_status,
-                        metadata=subtask.metadata,
-                    ))
-                else:
-                    validated_subtasks.append(subtask)
+                    subtask.dependencies = filtered_deps
+                validated_subtasks.append(subtask)
             subtasks = validated_subtasks
-            
-            # Check for cycles
+
             if self._has_cycles(subtasks):
-                logger.warning("Plan has circular dependencies, removing problematic ones")
+                logger.warning("Plan has circular dependencies; removing cyclic dependencies")
                 subtasks = self._remove_cycles(subtasks)
-            
+
             strategy_map = {
                 "sequential": ExecutionStrategy.SEQUENTIAL,
                 "parallel": ExecutionStrategy.PARALLEL,
