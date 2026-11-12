@@ -65,13 +65,14 @@ class ToolRegistry(Registry):
         entry = ToolRegistryEntry(
             manifest=manifest_obj,
             tool_class=tool_class,
+            enabled=enabled,
         )
         
         # Store in registry
         super().register(name, component=manifest_obj, metadata={
             "tool_class": tool_class,
             "manifest": manifest_obj,
-            "enabled": True,
+            "enabled": enabled,
         }, overwrite=overwrite)
         
         logger.info(f"Registered tool: {name} (risk: {manifest_obj.risk_level})")
