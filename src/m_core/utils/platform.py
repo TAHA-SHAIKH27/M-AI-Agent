@@ -2,6 +2,7 @@
 import sys
 import platform
 import structlog
+from typing import Optional
 
 logger = structlog.get_logger(__name__)
 
