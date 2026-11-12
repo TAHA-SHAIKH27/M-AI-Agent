@@ -1,5 +1,5 @@
-import ipaddress
 """Security middleware for REST API."""
+import ipaddress
 import structlog
 from typing import Callable, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
