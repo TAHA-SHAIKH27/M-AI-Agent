@@ -89,7 +89,8 @@ class ExecutionStateManager:
             logger.info(f"Loaded state: {len(self._execution_records)} executions, {len(self._checkpoints)} checkpoints")
             
         except Exception as e:
-            logger.warning(f"Failed to load state: {e}")
+            logger.error(f"Failed to load persisted orchestration state: {e}")
+            raise
     
     async def save_execution_state(self, context: OrchestrationContext) -> None:
         """Save execution state to disk."""
@@ -149,10 +150,13 @@ class ExecutionStateManager:
                 for sid, record in records.items()
             }
             
-            task_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temp_file = task_file.with_suffix(task_file.suffix + ".tmp")
+            temp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temp_file.replace(task_file)
             
         except Exception as e:
             logger.error(f"Failed to persist subtask records: {e}")
+            raise
     
     async def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         """Save a checkpoint."""
@@ -172,13 +176,16 @@ class ExecutionStateManager:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
             
             cp_file = checkpoint_dir / f"{checkpoint.checkpoint_id}.json"
-            cp_file.write_text(
+            temp_file = cp_file.with_suffix(cp_file.suffix + ".tmp")
+            temp_file.write_text(
                 json.dumps(self._checkpoint_to_dict(checkpoint), indent=2),
                 encoding="utf-8"
             )
+            temp_file.replace(cp_file)
             
         except Exception as e:
             logger.error(f"Failed to persist checkpoint: {e}")
+            raise
     
     async def get_execution_record(self, task_id: str) -> Optional[TaskExecutionRecord]:
         """Get execution record by task ID."""
