@@ -33,8 +33,8 @@ class SettingsPreferences @Inject constructor(
         .map { it[SERVER_URL] ?: "http://192.168.1.100:8080" }
         .firstOrError()
 
-    val apiKey: Single<String?> = dataStore.data
-        .map { it[API_KEY] }
+    val apiKey: Single<String> = dataStore.data
+        .map { it[API_KEY].orEmpty() }
         .firstOrError()
 
     val autoConnect: Single<Boolean> = dataStore.data
