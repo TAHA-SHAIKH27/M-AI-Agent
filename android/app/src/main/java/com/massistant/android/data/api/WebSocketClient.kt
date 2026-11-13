@@ -72,7 +72,7 @@ class WebSocketClient(
                     val message = json.decodeFromString<WSMessage>(text)
                     messageChannel.trySend(message)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse message: $text", e)
+                    Log.e(TAG, "Failed to parse incoming WebSocket message", e)
                 }
             }
 
