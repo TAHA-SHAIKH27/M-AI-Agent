@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.Result
@@ -111,7 +110,7 @@ class ChatRepository @Inject constructor(
                     message = message,
                     conversation_id = conversationId,
                     stream = false
-                )).await()
+                ))
                 if (response.isSuccessful) {
                     response.body()?.let { body ->
                         if (body.conversation_id.isNotBlank()) {
@@ -249,7 +248,7 @@ class ChatRepository @Inject constructor(
     // Voice methods
     suspend fun voiceRecord(duration: Int = 10): Result<VoiceRecordResponse> {
         return try {
-            val response = apiService.voiceRecord(VoiceRecordRequest(duration_seconds = duration)).await()
+            val response = apiService.voiceRecord(VoiceRecordRequest(duration_seconds = duration))
             if (response.isSuccessful) Result.success(response.body()!!)
             else Result.failure(Exception("HTTP ${response.code()}"))
         } catch (e: Exception) {
