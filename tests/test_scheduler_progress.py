@@ -62,3 +62,30 @@ async def test_parallel_scheduler_reports_each_completed_subtask(monkeypatch):
 
     assert {item[0] for item in reported} == {"one", "two"}
     assert all(status is SubtaskExecutionStatus.COMPLETED for _, status in reported)
+
+
+
+@pytest.mark.asyncio
+async def test_dependency_scheduler_fails_missing_dependencies_instead_of_spinning():
+    scheduler = TaskScheduler()
+    subtask = Subtask(
+        id="blocked",
+        name="blocked",
+        description="has an unavailable prerequisite",
+        dependencies=["missing-prerequisite"],
+    )
+    decision = RoutingDecision(
+        subtask_id=subtask.id,
+        target_type=RoutingTargetType.AGENT,
+        target_id="test-agent",
+    )
+    record = SubtaskExecutionRecord(subtask_id=subtask.id, task_id="blocked-task")
+    scheduled = {subtask.id: ScheduledTask(subtask, decision, record)}
+
+    results = await scheduler._execute_dependency_aware(
+        scheduled, None, None, "blocked-correlation", None, None
+    )
+
+    assert results["blocked"]["success"] is False
+    assert "dependencies" in results["blocked"]["error"]
+    assert record.status is SubtaskExecutionStatus.FAILED
