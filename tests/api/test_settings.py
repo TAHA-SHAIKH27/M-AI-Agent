@@ -1,6 +1,7 @@
 """Tests for settings endpoints."""
 import pytest
 from httpx import AsyncClient
+from m_core.model_providers import provider_factory
 
 
 class TestSettingsEndpoints:
@@ -46,7 +47,8 @@ class TestSettingsEndpoints:
         assert data["api_port"] == 8080
         assert "nvidia/nemotron-3-ultra" in data["nvidia_model"]
         assert isinstance(data["available_providers"], list)
-        assert "nvidia-nemotron-3-ultra" in data["available_providers"]
+        expected_provider_ids = [provider.id for provider in provider_factory.get_all_providers()]
+        assert data["available_providers"] == expected_provider_ids
 
 
 class TestProvidersEndpoints:

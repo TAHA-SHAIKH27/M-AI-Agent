@@ -158,7 +158,7 @@ class ExecutionOrchestrator:
             approval_required = any(s.requires_approval and s.approval_status == ApprovalStatus.PENDING for s in execution_plan.subtasks)
             if approval_required:
                 execution_record.status = TaskExecutionStatus.AWAITING_APPROVAL
-                execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+                execution_record.completed_at = None
                 
                 # Save state
                 orch_context = OrchestrationContext(
@@ -304,7 +304,11 @@ class ExecutionOrchestrator:
             raise
             
         finally:
-            self._active_tasks.pop(task_id, None)
+            # Approval-pending contexts must remain available for the approval
+            # handler; terminal and completed executions can be released.
+            active_context = self._active_tasks.get(task_id)
+            if not active_context or active_context.execution_record.status != TaskExecutionStatus.AWAITING_APPROVAL:
+                self._active_tasks.pop(task_id, None)
     
     async def _execute_plan(
         self,
@@ -536,10 +540,36 @@ class ExecutionOrchestrator:
                 )
         
         if approved:
-            still_pending = any(s.requires_approval and s.approval_status == ApprovalStatus.PENDING for s in subtasks)
+            still_pending = any(
+                s.requires_approval and s.approval_status == ApprovalStatus.PENDING
+                for s in subtasks
+            )
             if not still_pending:
                 context.execution_record.status = TaskExecutionStatus.RUNNING
+                context.execution_record.completed_at = None
                 context.pause_event.set()
+                correlation_id = str(uuid.uuid4())
+                try:
+                    await self._execute_plan(context, correlation_id)
+                    evaluation = await self._evaluator.evaluate_task(context)
+                    context.execution_record.status = self._evaluation_to_status(evaluation.overall_result)
+                    context.execution_record.result = evaluation.consolidated_result
+                    context.execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+                    await self._state_manager.save_execution_state(context)
+                    await self._create_checkpoint(context, CheckpointType.POST_EXECUTION)
+                    await event_bus.publish_sync(
+                        "task.completed",
+                        "orchestrator",
+                        {"task_id": task_id, "status": context.execution_record.status.value},
+                        correlation_id=correlation_id,
+                    )
+                except Exception as exc:
+                    context.execution_record.status = TaskExecutionStatus.FAILED
+                    context.execution_record.error = str(exc)
+                    context.execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+                    await self._state_manager.save_execution_state(context)
+                    logger.exception("Failed to resume approved task", task_id=task_id, error=str(exc))
+                    return False
         else:
             context.execution_record.status = TaskExecutionStatus.FAILED
             context.execution_record.error = f"Action denied: {reason or 'User denied action'}"

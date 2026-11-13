@@ -2,6 +2,8 @@
 import pytest
 from httpx import AsyncClient
 
+from m_core.model_providers import provider_factory
+
 
 class TestStartupShutdown:
     """Test application startup and shutdown."""
@@ -62,8 +64,9 @@ class TestProviderAvailability:
         data = response.json()
         providers = data["providers"]
         
-        # Should have at least primary
-        assert "nvidia-nemotron-3-ultra" in providers
+        # Only providers configured for this environment are registered.
+        expected_provider_ids = {provider.id for provider in provider_factory.get_all_providers()}
+        assert set(providers) == expected_provider_ids
         
         # Each provider should have health info
         for pid, health in providers.items():
