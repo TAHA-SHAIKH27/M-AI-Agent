@@ -641,20 +641,38 @@ class ExecutionOrchestrator:
         # Check persisted state
         return await self._state_manager.get_execution_record(task_id)
     
-    async def resume_from_checkpoint(self, checkpoint_id: str) -> TaskExecutionRecord:
-        """Resume task execution from a checkpoint."""
+    async def resume_from_checkpoint(self, checkpoint_id: str) -> Optional[TaskExecutionRecord]:
+        """Resume a paused in-process task after validating its persisted checkpoint.
+
+        The active scheduler context is required because execution plans are not
+        yet persisted as restart-recoverable snapshots.
+        """
         checkpoint = await self._state_manager.get_checkpoint(checkpoint_id)
         if not checkpoint:
-            raise ValueError(f"Checkpoint not found: {checkpoint_id}")
-        
-        # Reconstruct context from checkpoint
-        # This would restore the execution state and continue
-        # For now, return the record
-        record = await self._state_manager.get_execution_record(checkpoint.task_id)
-        if not record:
-            raise ValueError(f"Execution record not found for checkpoint: {checkpoint_id}")
-        
-        return record
+            return None
+
+        context = self._active_tasks.get(checkpoint.task_id)
+        if not context:
+            # Do not claim a restart recovery that cannot be reconstructed safely.
+            return None
+        if context.execution_record.status != TaskExecutionStatus.PAUSED:
+            return None
+        if not any(cp.checkpoint_id == checkpoint_id for cp in context.checkpoints):
+            return None
+
+        context.execution_record.status = TaskExecutionStatus.RUNNING
+        context.pause_event.set()
+        await self._state_manager.save_execution_state(context)
+        await event_bus.publish_sync(
+            "task.resumed",
+            "orchestrator",
+            {
+                "task_id": checkpoint.task_id,
+                "checkpoint_id": checkpoint_id,
+                "status": TaskExecutionStatus.RUNNING.value,
+            },
+        )
+        return context.execution_record
 
 
 # Global orchestrator instance
