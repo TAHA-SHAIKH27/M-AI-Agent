@@ -25,11 +25,10 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MAndroidCompanion"
-        android:usesCleartextTraffic="true"
         tools:targetApi="31">
 
         <activity
-            android:name=".ui.MainActivity"
+            android:name=".ui.screens.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:theme="@style/Theme.MAndroidCompanion"
