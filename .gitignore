@@ -100,3 +100,6 @@ data/orchestration/
 data/checkpoints/
 data/runtime/
 test_chroma/
+
+# Local vector database test artifacts
+data/test_chroma/
