@@ -8,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +26,7 @@ import com.massistant.android.ui.components.LoadingOverlay
 import com.massistant.android.ui.components.MessageList
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     repository: ChatRepository,
@@ -261,7 +263,7 @@ fun NavigationItem(
             .fillMaxWidth()
             .padding(vertical = 12.dp)
             .background(
-                if (selected) colors.primaryContainer else androidx.compose.ui.graphics.Color.Transparent,
+                if (selected) colors.primaryContainer else Color.Transparent,
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
             )
             .clickable(onClick = onClick),
