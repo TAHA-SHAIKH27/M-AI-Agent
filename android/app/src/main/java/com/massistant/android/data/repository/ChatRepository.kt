@@ -129,20 +129,37 @@ class ChatRepository(
     }
 
     private fun saveMessage(content: String, role: String) {
-        val conversationId = _currentConversationId.value ?: return
+        val conversationId = _currentConversationId.value ?: "conv_\${System.currentTimeMillis()}".also {
+            _currentConversationId.value = it
+        }
         val message = ChatMessage(role = role, content = content)
         _messages.value = _messages.value + message
-        
-        // Save to database
+
+        // Ensure a conversation exists before persisting its first message.
         CoroutineScope(Dispatchers.IO).launch {
-            database.conversationDao().insertMessages(listOf(
-                MessageEntity(
-                    conversationId = conversationId,
-                    role = role,
-                    content = content,
-                    timestamp = message.timestamp
+            val dao = database.conversationDao()
+            if (dao.getConversation(conversationId) == null) {
+                dao.insertConversation(
+                    ConversationEntity(
+                        id = conversationId,
+                        title = content.take(50).ifBlank { "New Conversation" },
+                        lastMessage = content,
+                        messageCount = 0,
+                        updatedAt = message.timestamp,
+                        createdAt = message.timestamp
+                    )
                 )
-            ))
+            }
+            dao.insertMessages(
+                listOf(
+                    MessageEntity(
+                        conversationId = conversationId,
+                        role = role,
+                        content = content,
+                        timestamp = message.timestamp
+                    )
+                )
+            )
         }
     }
 
