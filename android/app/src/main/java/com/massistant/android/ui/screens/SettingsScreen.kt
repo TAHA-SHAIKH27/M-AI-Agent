@@ -102,7 +102,7 @@ fun SettingsScreen(
                     .subscribeOn(Schedulers.io())
                     .blockingAwait()
                 
-                successMessage = "Settings saved successfully"
+                successMessage = "Settings saved. Restart M to apply server URL and API key changes."
             } catch (e: Exception) {
                 errorMessage = "Failed to save settings: ${e.message}"
             } finally {
@@ -140,7 +140,7 @@ fun SettingsScreen(
                         value = serverUrl,
                         onValueChange = { serverUrl = it },
                         label = { Text("Server URL") },
-                        placeholder = { Text("http://192.168.1.100:8000") },
+                        placeholder = { Text("http://192.168.1.100:8080") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
