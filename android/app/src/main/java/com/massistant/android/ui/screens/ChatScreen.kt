@@ -24,6 +24,7 @@ import com.massistant.android.ui.components.ChatInput
 import com.massistant.android.ui.components.ConnectionStatusIndicator
 import com.massistant.android.ui.components.LoadingOverlay
 import com.massistant.android.ui.components.MessageList
+import com.massistant.android.ui.components.MessageBubble
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
