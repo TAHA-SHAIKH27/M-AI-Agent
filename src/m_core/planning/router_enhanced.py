@@ -12,7 +12,7 @@ from ..model_providers import provider_factory
 from ..agents import agent_registry
 from ..agents.schemas import AgentManifest
 from ..tools import tool_registry
-from ..tools.schemas import ToolManifest, ToolRiskLevel
+from ..tools.schemas import ToolRiskLevel
 from ..security import consent_manager
 from ..core.events import event_bus
 from ..utils.logging import get_logger
@@ -21,7 +21,6 @@ from ..planning.schemas import (
     ExecutionPlan, Subtask, TaskAnalysis,
     ApprovalStatus,
 )
-from .schemas import TaskExecutionStatus
 
 logger = get_logger(__name__)
 
@@ -75,7 +74,7 @@ class ControlMethodSelector:
     ]
 
     def __init__(self):
-        self._tool_cache: Dict[str, ToolManifest] = {}
+        self._tool_cache: Dict[str, Dict[str, Any]] = {}
         self._initialized = False
     
     async def initialize(self):
@@ -87,14 +86,13 @@ class ControlMethodSelector:
         self._initialized = True
     
     def _check_tool_available(self, tool_name: str) -> bool:
-        """Check if tool is available and consent granted."""
-        if tool_name not in self._tool_cache:
+        """Check registry availability and required consent for a tool."""
+        tool = self._tool_cache.get(tool_name)
+        if not tool or not tool.get("enabled", True):
             return False
-        tool = self._tool_cache[tool_name]
-        if hasattr(tool.manifest, 'required_permissions'):
-            for perm in tool.manifest.required_permissions:
-                if not consent_manager.is_granted(perm):
-                    return False
+        for permission in tool.get("required_permissions", []):
+            if not consent_manager.is_granted(permission):
+                return False
         return True
     
     def _analyze_task_intent(self, subtask: "Subtask") -> Dict[str, Any]:
@@ -263,20 +261,34 @@ class EnhancedIntelligentRouter:
             subtask = next((s for s in execution_plan.subtasks if s.id == decision.subtask_id), None)
             if subtask:
                 selection = await self._selector.select_control_method(subtask, execution_plan)
-                # Enhance decision metadata
+                # Use the selected control tool as the primary route when it is
+                # actually registered and permitted. The base router remains the
+                # fallback for tasks that need an agent or lack a usable tool.
+                selected_tool = selection["primary_tool"]
+                use_selected_tool = (
+                    decision.target_type != RoutingTargetType.TOOL
+                    and selected_tool != "general_assistant"
+                    and self._selector._check_tool_available(selected_tool)
+                )
+                target_type = RoutingTargetType.TOOL if use_selected_tool else decision.target_type
+                target_id = selected_tool if use_selected_tool else decision.target_id
+
+                # Enhance the decision with an executable primary target and
+                # preserve the original router targets as fallbacks.
                 enhanced_decision = RoutingDecision(
                     subtask_id=decision.subtask_id,
-                    target_type=decision.target_type,
-                    target_id=decision.target_id,
-                    confidence=decision.confidence,
+                    target_type=target_type,
+                    target_id=target_id,
+                    confidence=max(decision.confidence, 0.8) if use_selected_tool else decision.confidence,
                     reasoning=f"{decision.reasoning} | Control: {selection['reasoning']}",
-                    fallback_targets=decision.fallback_targets + [
-                        {"type": "control_method", "method": selection["method"].value, "tool": t}
+                    fallback_targets=list(decision.fallback_targets or []) + [
+                        {"type": "tool", "id": t, "reason": "alternate control method"}
                         for t in selection["fallback_tools"]
                     ],
                     metadata={
                         **decision.metadata,
                         "control_method": selection["method"].value,
+                        "control_primary_tool": selected_tool if use_selected_tool else None,
                         "control_analysis": selection["analysis"],
                         "fallback_chain": selection["fallback_tools"],
                     }

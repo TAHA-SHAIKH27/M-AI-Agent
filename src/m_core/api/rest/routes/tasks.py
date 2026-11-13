@@ -81,6 +81,7 @@ async def list_tasks(
                 TaskExecutionStatus.QUEUED: "queued",
                 TaskExecutionStatus.RUNNING: "running",
                 TaskExecutionStatus.WAITING: "waiting",
+                TaskExecutionStatus.PAUSED: "paused",
                 TaskExecutionStatus.COMPLETED: "completed",
                 TaskExecutionStatus.FAILED: "failed",
                 TaskExecutionStatus.CANCELLED: "cancelled",
@@ -218,6 +219,7 @@ async def get_task(
             TaskExecutionStatus.QUEUED: "queued",
             TaskExecutionStatus.RUNNING: "running",
             TaskExecutionStatus.WAITING: "waiting",
+            TaskExecutionStatus.PAUSED: "paused",
             TaskExecutionStatus.COMPLETED: "completed",
             TaskExecutionStatus.FAILED: "failed",
             TaskExecutionStatus.CANCELLED: "cancelled",
@@ -261,12 +263,11 @@ async def get_task(
 )
 async def get_task_events(
     task_id: str,
+    after_event_id: Optional[str] = Query(None, description="Return events after this event ID"),
     client: APIClientInfo = Depends(get_client_info),
     _: None = Depends(validate_localhost),
 ) -> TaskEventStream:
-    """Get the event stream for a task."""
-    # This would require event persistence - for now return empty
-    # In a full implementation, events would be persisted alongside task state
+    """Replay recent in-memory events for a task after reconnecting."""
     try:
         record = await state_manager.get_execution_record(task_id)
         if not record:
@@ -274,13 +275,49 @@ async def get_task_events(
                 status_code=404,
                 detail={"error": f"Task '{task_id}' not found", "error_code": "TASK_NOT_FOUND"},
             )
-        
+
+        task_events = [
+            event for event in event_bus.get_history(limit=1000)
+            if event.payload.get("task_id") == task_id
+        ]
+        if after_event_id:
+            cursor_index = next(
+                (index for index, event in enumerate(task_events) if event.event_id == after_event_id),
+                None,
+            )
+            if cursor_index is not None:
+                task_events = task_events[cursor_index + 1:]
+
+        serialized_events = []
+        for event in task_events:
+            priority = (
+                "urgent" if event.type == "task.awaiting_approval"
+                else "attention" if event.type in {"task.failed", "task.step_failed", "task.verification_failed"}
+                else "normal"
+            )
+            serialized_events.append(TaskEvent(
+                event_id=event.event_id,
+                task_id=task_id,
+                event_type=event.type,
+                timestamp=int(event.timestamp.timestamp() * 1000),
+                priority=priority,
+                step_id=event.payload.get("subtask_id") or event.payload.get("step_id"),
+                status=event.payload.get("status"),
+                progress={
+                    key: event.payload[key]
+                    for key in ("completed", "total")
+                    if key in event.payload
+                } or None,
+                message=event.payload.get("message") or event.type,
+                metadata=event.payload,
+            ))
+
         return TaskEventStream(
             task_id=task_id,
-            events=[],  # Would be populated from event store
-            latest_event_id=None,
+            events=serialized_events,
+            latest_event_id=serialized_events[-1].event_id if serialized_events else None,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -332,6 +369,72 @@ async def cancel_task(
                 "error_code": "TASK_CANCEL_FAILED",
                 "details": {"message": str(e)},
             },
+        )
+
+
+@router.post(
+    "/{task_id}/pause",
+    response_model=TaskInfo,
+    summary="Pause a task",
+    description="Pause a running task between subtask boundaries",
+)
+async def pause_task(
+    task_id: str,
+    client: APIClientInfo = Depends(get_client_info),
+    _: None = Depends(validate_localhost),
+) -> TaskInfo:
+    """Pause a running task."""
+    try:
+        success = await orchestrator.pause_task(task_id)
+        if not success:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": f"Task '{task_id}' is not currently pausable",
+                    "error_code": "TASK_NOT_PAUSABLE",
+                },
+            )
+        return await get_task(task_id, client)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("pause_task_failed", task_id=task_id, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to pause task", "error_code": "TASK_PAUSE_FAILED"},
+        )
+
+
+@router.post(
+    "/{task_id}/resume",
+    response_model=TaskInfo,
+    summary="Resume a paused task",
+    description="Resume a task previously paused by the user",
+)
+async def resume_task(
+    task_id: str,
+    client: APIClientInfo = Depends(get_client_info),
+    _: None = Depends(validate_localhost),
+) -> TaskInfo:
+    """Resume a paused task."""
+    try:
+        success = await orchestrator.resume_task(task_id)
+        if not success:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": f"Task '{task_id}' is not currently resumable",
+                    "error_code": "TASK_NOT_RESUMABLE",
+                },
+            )
+        return await get_task(task_id, client)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("resume_task_failed", task_id=task_id, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to resume task", "error_code": "TASK_RESUME_FAILED"},
         )
 
 
@@ -434,7 +537,7 @@ async def list_checkpoints(
 
 
 @router.post(
-    "/{task_id}/resume",
+    "/{task_id}/checkpoints/{checkpoint_id}/resume",
     summary="Resume task from checkpoint",
     description="Resume task execution from a specific checkpoint",
 )

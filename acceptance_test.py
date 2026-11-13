@@ -15,7 +15,9 @@ from m_core.orchestration.schemas import TaskExecutionStatus, SubtaskExecutionSt
 from m_core.tools import tool_registry
 from m_core.tools.schemas import ToolExecutionContext
 from m_core.security import consent_manager, ConsentScope
-from m_core.api.rest.routes.tasks import router as tasks_router
+from m_core.api.rest.routes.tasks import router as tasks_router, get_task_events
+from m_core.api.rest.dependencies import APIClientInfo
+from m_core.core.events import event_bus
 
 async def test_application_automation():
     """TEST 1: Application Automation"""
@@ -59,6 +61,9 @@ async def test_application_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
+    if not result.success:
+        print(f"   FAIL: window enumeration failed: {result.error}")
+        return False
     if result.success:
         notepad_windows = [w for w in result.result['windows'] if 'notepad' in w['process_name'].lower()]
         print(f"   Notepad windows found: {len(notepad_windows)}")
@@ -67,8 +72,8 @@ async def test_application_automation():
             notepad_windows = [w for w in result.result['windows'] if 'notepad' in w['title'].lower()]
             print(f"   Notepad windows by title: {len(notepad_windows)}")
         if not notepad_windows:
-            print("   WARNING: Notepad window not found by process name or title, but process was launched")
-            # Don't fail - the process was launched successfully
+            print("   FAIL: Notepad process launched but no matching window was found")
+            return False
     
     # 3. Request approval before keyboard input
     print("\n3. Testing approval requirement for keyboard input...")
@@ -118,13 +123,15 @@ async def test_application_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        text = result.result['text']
-        print(f"   OCR text length: {len(text)}")
-        if "Phase 6 Acceptance Test" in text:
-            print("   PASS: Text found in OCR")
-        else:
-            print("   WARNING: Exact test text not found in OCR (may be font/position issue)")
+    if not result.success:
+        print(f"   FAIL: OCR failed: {result.error}")
+        return False
+    text = result.result['text']
+    print(f"   OCR text length: {len(text)}")
+    if "Phase 6 Acceptance Test" not in text:
+        print("   FAIL: Typed acceptance text was not detected by OCR")
+        return False
+    print("   PASS: Typed acceptance text found in OCR")
     
     # 6. Verify screen state
     print("\n6. Verifying screen state...")
@@ -139,8 +146,9 @@ async def test_application_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        print(f"   Verification passed: {result.result['passed']}")
+    if not result.success or not result.result.get("passed", False):
+        print(f"   FAIL: Screen verification did not pass: {result.error or result.result}")
+        return False
     
     print("\nTEST 1: Application Automation - PASS")
     return True
@@ -274,7 +282,7 @@ async def test_visual_automation():
     tool = tool_registry.get_tool("visual_find")
     context = ToolExecutionContext(
         tool_name="visual_find",
-        arguments={"method": "text", "search_text": "Windows", "threshold": 0.5},
+        arguments={"method": "text", "search_text": "Phase", "threshold": 0.5},
         correlation_id="accept-v3",
         user_id="test-user",
         permissions_granted=["screen:find"],
@@ -282,18 +290,23 @@ async def test_visual_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        matches = result.result['matches']
-        print(f"   Matches found: {len(matches)}")
-        for m in matches[:3]:
-            print(f"   Match at ({m['x']}, {m['y']}) size {m['width']}x{m['height']} conf {m['confidence']:.2f}")
+    if not result.success:
+        print(f"   FAIL: Visual find failed: {result.error}")
+        return False
+    matches = result.result['matches']
+    print(f"   Matches found: {len(matches)}")
+    if not matches:
+        print("   FAIL: Expected visible text was not found")
+        return False
+    for m in matches[:3]:
+        print(f"   Match at ({m['x']}, {m['y']}) size {m['width']}x{m['height']} conf {m['confidence']:.2f}")
     
     # 4. Report result
     print("\n4. Reporting visual verification...")
     tool = tool_registry.get_tool("visual_verify")
     context = ToolExecutionContext(
         tool_name="visual_verify",
-        arguments={"check_type": "text_present", "search_text": "Windows", "threshold": 0.5},
+        arguments={"check_type": "text_present", "search_text": "Phase", "threshold": 0.5},
         correlation_id="accept-v4",
         user_id="test-user",
         permissions_granted=["screen:verify"],
@@ -301,9 +314,11 @@ async def test_visual_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        print(f"   Verification passed: {result.result['passed']}")
-        print(f"   Confidence: {result.result['confidence']:.2f}")
+    if not result.success or not result.result.get("passed", False):
+        print(f"   FAIL: Visual verification failed: {result.error or result.result}")
+        return False
+    print(f"   Verification passed: {result.result['passed']}")
+    print(f"   Confidence: {result.result['confidence']:.2f}")
     
     print("\nTEST 3: Visual Automation - PASS")
     return True
@@ -370,13 +385,15 @@ async def test_task_orchestration():
     
     # 8. Completion reporting
     print("\n8. Completion reporting...")
-    if execution_record.status == TaskExecutionStatus.COMPLETED:
-        print("  PASS: Task completed successfully")
-    elif execution_record.status == TaskExecutionStatus.FAILED:
-        print(f"  FAIL: Task failed - {execution_record.error}")
+    if execution_record.status != TaskExecutionStatus.COMPLETED:
+        print(f"  FAIL: Task did not complete: {execution_record.status.value} ({execution_record.error})")
         return False
-    else:
-        print(f"  Status: {execution_record.status.value}")
+    if completed != len(execution_record.subtask_records) or failed:
+        print("  FAIL: One or more subtasks did not complete successfully")
+        return False
+    if not execution_record.result:
+        print("  FAIL: Completed task has no consolidated result")
+        return False
     
     print("\nTEST 4: Task Orchestration - PASS")
     return True
@@ -413,11 +430,16 @@ async def test_human_intervention():
             reason="User approved"
         )
         print(f"   Approval success: {success}")
+        if not success:
+            print("   FAIL: Approval action was rejected by the orchestrator")
+            return False
         
         # Check status after approval
         record = await orchestrator.get_task_status(execution_record.task_id)
-        if record:
-            print(f"   Status after approval: {record.status.value}")
+        if not record or record.status == TaskExecutionStatus.AWAITING_APPROVAL:
+            print("   FAIL: Approved task did not leave the approval-waiting state")
+            return False
+        print(f"   Status after approval: {record.status.value}")
         
         # 3. Test rejection on new task
         print("\n3. Testing approval rejection...")
@@ -436,23 +458,36 @@ async def test_human_intervention():
             )
             print(f"   Rejection success: {success}")
             record = await orchestrator.get_task_status(execution_record2.task_id)
-            if record:
-                print(f"   Status after rejection: {record.status.value}")
+            if not success or not record or record.status != TaskExecutionStatus.FAILED:
+                print("   FAIL: Rejected task was not marked failed")
+                return False
+            print(f"   Status after rejection: {record.status.value}")
+        else:
+            print("   FAIL: Rejection test task did not request approval")
+            return False
         
-        # 4. Task pause (via cancellation)
-        print("\n4. Testing task cancellation (pause)...")
+        # 4. Task cancellation
+        print("\n4. Testing task cancellation...")
         execution_record3 = await orchestrator.execute_task(
             user_request="Open Notepad",
             conversation_id="accept-hi-3",
             user_id="test-user",
             context={}
         )
-        if execution_record3.status != TaskExecutionStatus.AWAITING_APPROVAL:
-            success = await orchestrator.cancel_task(execution_record3.task_id)
-            print(f"   Cancel success: {success}")
-            record = await orchestrator.get_task_status(execution_record3.task_id)
-            if record:
-                print(f"   Status after cancel: {record.status.value}")
+        if execution_record3.status not in (
+            TaskExecutionStatus.AWAITING_APPROVAL,
+            TaskExecutionStatus.RUNNING,
+            TaskExecutionStatus.QUEUED,
+        ):
+            print(f"   FAIL: Cancellation test task was not cancellable: {execution_record3.status.value}")
+            return False
+        success = await orchestrator.cancel_task(execution_record3.task_id)
+        record = await orchestrator.get_task_status(execution_record3.task_id)
+        if not success or not record or record.status != TaskExecutionStatus.CANCELLED:
+            print("   FAIL: Task cancellation did not persist the cancelled state")
+            return False
+        print(f"   Cancel success: {success}")
+        print(f"   Status after cancel: {record.status.value}")
         
         print("\nTEST 5: Human Intervention - PASS")
         return True
@@ -585,45 +620,36 @@ async def test_realtime_communication():
     # - task.verification
     # - task.completed or task.failed
     
-    print("\n2. Verifying event structure...")
-    record = await state_manager.get_execution_record(task_id)
-    if record:
-        print(f"   Task: {task_id}")
-        print(f"   Final status: {record.status.value}")
-        print(f"   Subtasks executed: {len(record.subtask_records)}")
-        for sr in record.subtask_records:
-            print(f"  - {sr.subtask_id}: {sr.status.value} (target: {sr.assigned_target_type}:{sr.assigned_target_id})")
-    
-    # 2. Verify WebSocket event payloads are properly structured
-    print("\n3. Verifying event payload structure...")
-    # Events are defined in schemas.py with proper payloads
-    # Key events verified:
-    print("   PASS task.created - TaskCreatedPayload")
-    print("   PASS task.started - TaskStartedPayload") 
-    print("   PASS task.progress - TaskProgressPayload")
-    print("   PASS task.step_started - TaskStepStartedPayload")
-    print("   PASS task.step_completed - TaskStepCompletedPayload")
-    print("   PASS task.step_failed - TaskStepFailedPayload")
-    print("   PASS task.verification - TaskVerificationPayload")
-    print("   PASS task.retry - TaskRetryPayload")
-    print("   PASS task.replanning - TaskReplanningPayload")
-    print("   PASS task.awaiting_approval - TaskApprovalRequiredPayload")
-    print("   PASS task.approved - TaskApprovedPayload")
-    print("   PASS task.denied - TaskDeniedPayload")
-    print("   PASS task.paused - TaskPausedPayload")
-    print("   PASS task.resumed - TaskResumedPayload")
-    print("   PASS task.cancelled - TaskCancelledPayload")
-    print("   PASS task.completed - TaskCompletedPayload")
-    print("   PASS task.failed - TaskFailedPayload")
-    print("   PASS task.verification_failed - TaskVerificationFailedPayload")
-    print("   PASS task.recovery - TaskRecoveryPayload")
-    
-    # 3. Reconnection support (event persistence)
-    print("\n4. Reconnection support...")
-    print("   Events are published to event_bus (in-memory)")
-    print("   For production: events should be persisted to DB for replay")
-    print("   Current: event history available via event_bus.history")
-    
+    print("\n2. Verifying events actually emitted...")
+    events = [
+        event for event in event_bus.get_history(limit=1000)
+        if event.payload.get("task_id") == task_id
+    ]
+    event_types = {event.type for event in events}
+    required_events = {"task.created", "task.started", "task.progress"}
+    if not required_events.issubset(event_types):
+        print(f"   FAIL: Missing emitted events: {sorted(required_events - event_types)}")
+        return False
+    if not ({"task.completed", "task.failed"} & event_types):
+        print("   FAIL: No terminal task event was emitted")
+        return False
+
+    print("\n3. Verifying reconnect replay endpoint...")
+    replay = await get_task_events(
+        task_id,
+        after_event_id=None,
+        client=APIClientInfo(host="127.0.0.1"),
+        _=None,
+    )
+    replay_types = {event.event_type for event in replay.events}
+    if not required_events.issubset(replay_types):
+        print(f"   FAIL: Reconnect replay is missing events: {sorted(required_events - replay_types)}")
+        return False
+    if replay.latest_event_id != replay.events[-1].event_id:
+        print("   FAIL: Latest event cursor is incorrect")
+        return False
+    print(f"   Replayed {len(replay.events)} events; latest cursor: {replay.latest_event_id}")
+
     print("\nTEST 7: Real-time Communication - PASS")
     return True
 

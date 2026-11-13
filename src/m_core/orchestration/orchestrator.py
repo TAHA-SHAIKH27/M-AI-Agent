@@ -23,10 +23,11 @@ from .schemas import (
     EvaluationResult,
 )
 from ..planning import (
-    planner, router, task_understanding,
+    planner, task_understanding,
     TaskAnalysis, ExecutionPlan, RoutingPlan, Subtask, TaskContext,
     TaskType, TaskComplexity,
 )
+from ..planning.router_enhanced import enhanced_router
 from ..planning.schemas import ApprovalStatus
 
 logger = get_logger(__name__)
@@ -44,6 +45,11 @@ class OrchestrationContext:
     checkpoints: List[Checkpoint]
     cancelled: bool = False
     pause_event: asyncio.Event = field(default_factory=asyncio.Event)
+    approval_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __post_init__(self) -> None:
+        # Execution starts unpaused; approval waits use a separate event.
+        self.pause_event.set()
 
 
 class ExecutionOrchestrator:
@@ -61,6 +67,7 @@ class ExecutionOrchestrator:
         self._recovery_manager = recovery_manager
         self._evaluator = evaluator
         self._active_tasks: Dict[str, OrchestrationContext] = {}
+        self._cancelled_task_ids: set[str] = set()
         self._execution_hooks: List[Callable] = []
         self._initialized = False
     
@@ -98,11 +105,12 @@ class ExecutionOrchestrator:
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
     ) -> TaskExecutionRecord:
         """Execute a complete user task from request to final result."""
         await self.initialize()
         
-        task_id = str(uuid.uuid4())[:8]
+        task_id = task_id or str(uuid.uuid4())[:8]
         correlation_id = str(uuid.uuid4())
         
         # Create task context
@@ -113,15 +121,27 @@ class ExecutionOrchestrator:
             session_data=context or {},
         )
         
-        # Create initial execution record early so it's available in error handlers
-        execution_record = TaskExecutionRecord(
-            task_id=task_id,
-            execution_plan_id="",  # Will be updated after planning
-            conversation_id=conversation_id,
-            user_id=user_id,
-            status=TaskExecutionStatus.PENDING,
-        )
-        
+        # Reuse the queued record created by the asynchronous task API when present.
+        execution_record = await self._state_manager.get_execution_record(task_id)
+        if execution_record is None:
+            execution_record = TaskExecutionRecord(
+                task_id=task_id,
+                execution_plan_id="",
+                conversation_id=conversation_id,
+                user_id=user_id,
+                status=TaskExecutionStatus.PENDING,
+            )
+        else:
+            execution_record.execution_plan_id = ""
+            execution_record.conversation_id = conversation_id
+            execution_record.user_id = user_id
+            if execution_record.status == TaskExecutionStatus.CANCELLED or task_id in self._cancelled_task_ids:
+                self._cancelled_task_ids.discard(task_id)
+                return execution_record
+            execution_record.status = TaskExecutionStatus.QUEUED
+            execution_record.error = None
+            execution_record.completed_at = None
+
         # Publish task created event
         await event_bus.publish_sync(
             "task.created",
@@ -138,7 +158,16 @@ class ExecutionOrchestrator:
             execution_plan = await planner.create_plan(analysis, task_context, user_request)
             
             # Phase 3: Routing
-            routing_plan = await router.create_routing_plan(execution_plan)
+            routing_plan = await enhanced_router.create_routing_plan(execution_plan)
+
+            # Close the race where cancellation arrives while planning is in progress.
+            if task_id in self._cancelled_task_ids:
+                self._cancelled_task_ids.discard(task_id)
+                execution_record.status = TaskExecutionStatus.CANCELLED
+                execution_record.error = "Task cancelled before execution"
+                execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._state_manager.save_execution_record(execution_record)
+                return execution_record
             
             # Update execution record with plan IDs
             execution_record.execution_plan_id = execution_plan.task_id
@@ -154,6 +183,7 @@ class ExecutionOrchestrator:
                     dependencies=subtask.dependencies,
                     max_retries=subtask.max_retries,
                 )
+            execution_record.subtask_records = list(subtask_records.values())
             
             # Check for approval requirements before execution
             approval_required = any(s.requires_approval and s.approval_status == ApprovalStatus.PENDING for s in execution_plan.subtasks)
@@ -214,13 +244,27 @@ class ExecutionOrchestrator:
             
             # Execute the plan
             await self._execute_plan(orch_context, correlation_id)
-            
+
+            # Cancellation is cooperative at scheduler boundaries. Do not let
+            # the evaluator turn a cancelled partial run into "completed".
+            if orch_context.cancelled:
+                execution_record.status = TaskExecutionStatus.CANCELLED
+                execution_record.error = "Task cancelled"
+                execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._state_manager.save_execution_state(orch_context)
+                await self._create_checkpoint(orch_context, CheckpointType.POST_EXECUTION)
+                return execution_record
+
             # Final evaluation
             evaluation = await self._evaluator.evaluate_task(orch_context)
-            
-            # Update final status
-            execution_record.status = self._evaluation_to_status(evaluation.overall_result)
-            execution_record.result = evaluation.consolidated_result
+
+            # Cancellation may arrive while verification is running.
+            if orch_context.cancelled:
+                execution_record.status = TaskExecutionStatus.CANCELLED
+                execution_record.error = "Task cancelled"
+            else:
+                execution_record.status = self._evaluation_to_status(evaluation.overall_result)
+                execution_record.result = evaluation.consolidated_result
             execution_record.completed_at = int(datetime.now().timestamp() * 1000)
             
             # Save final state
@@ -230,23 +274,38 @@ class ExecutionOrchestrator:
             await self._create_checkpoint(orch_context, CheckpointType.POST_EXECUTION)
             
             # Publish completion event
+            terminal_event = (
+                "task.cancelled"
+                if execution_record.status == TaskExecutionStatus.CANCELLED
+                else "task.completed"
+                if evaluation.overall_result == EvaluationResult.SUCCESS
+                else "task.failed"
+            )
             await event_bus.publish_sync(
-                "task.completed" if evaluation.overall_result == EvaluationResult.SUCCESS else "task.failed",
+                terminal_event,
                 "orchestrator",
                 {
                     "task_id": task_id,
-                    "result": evaluation.overall_result.value,
+                    "result": execution_record.status.value,
                     "execution_time_ms": evaluation.execution_time_ms,
                 },
                 correlation_id=correlation_id
             )
             
             # Log audit
+            task_succeeded = (
+                execution_record.status != TaskExecutionStatus.CANCELLED
+                and evaluation.overall_result == EvaluationResult.SUCCESS
+            )
             audit_logger.log(
-                event_type=AuditEventType.AGENT_COMPLETED if evaluation.overall_result == EvaluationResult.SUCCESS else AuditEventType.AGENT_FAILED,
+                event_type=AuditEventType.AGENT_COMPLETED if task_succeeded else AuditEventType.AGENT_FAILED,
                 resource=task_id,
                 action="execute_task",
-                result="success" if evaluation.overall_result == EvaluationResult.SUCCESS else "failure",
+                result=(
+                    "success" if task_succeeded
+                    else "cancelled" if execution_record.status == TaskExecutionStatus.CANCELLED
+                    else "failure"
+                ),
                 details={"evaluation": evaluation.overall_result.value},
                 correlation_id=correlation_id,
             )
@@ -310,6 +369,7 @@ class ExecutionOrchestrator:
             active_context = self._active_tasks.get(task_id)
             if not active_context or active_context.execution_record.status != TaskExecutionStatus.AWAITING_APPROVAL:
                 self._active_tasks.pop(task_id, None)
+            self._cancelled_task_ids.discard(task_id)
     
     async def _execute_plan(
         self,
@@ -337,6 +397,7 @@ class ExecutionOrchestrator:
             correlation_id=correlation_id,
             progress_callback=lambda s, r: self._on_subtask_progress(context, s, r, correlation_id),
             cancellation_check=lambda: context.cancelled,
+            pause_event=context.pause_event,
         )
         
         # Update records with results
@@ -347,6 +408,8 @@ class ExecutionOrchestrator:
                 record.result = result.get("result")
                 record.error = result.get("error")
                 record.completed_at = int(datetime.now().timestamp() * 1000)
+        
+        execution_record.subtask_records = list(context.subtask_records.values())
         
         # Create checkpoint after execution
         await self._create_checkpoint(context, CheckpointType.POST_EXECUTION)
@@ -415,9 +478,9 @@ class ExecutionOrchestrator:
         
         # If approval is still pending, wait for explicit approval
         if subtask and subtask.approval_status == ApprovalStatus.PENDING:
-            context.pause_event.clear()
+            context.approval_event.clear()
             try:
-                await asyncio.wait_for(context.pause_event.wait(), timeout=30.0)
+                await asyncio.wait_for(context.approval_event.wait(), timeout=30.0)
             except asyncio.TimeoutError:
                 subtask.approval_status = ApprovalStatus.DENIED
                 context.execution_record.status = TaskExecutionStatus.FAILED
@@ -478,14 +541,71 @@ class ExecutionOrchestrator:
         }
         return mapping.get(evaluation, TaskExecutionStatus.FAILED)
     
+    async def pause_task(self, task_id: str) -> bool:
+        """Pause a running task between subtask boundaries."""
+        context = self._active_tasks.get(task_id)
+        if not context or context.execution_record.status != TaskExecutionStatus.RUNNING:
+            return False
+        context.pause_event.clear()
+        context.execution_record.status = TaskExecutionStatus.PAUSED
+        checkpoint = await self._create_checkpoint(context, CheckpointType.MANUAL)
+        await self._state_manager.save_execution_state(context)
+        await event_bus.publish_sync(
+            "task.paused",
+            "orchestrator",
+            {
+                "task_id": task_id,
+                "status": TaskExecutionStatus.PAUSED.value,
+                "checkpoint_id": checkpoint.checkpoint_id,
+            },
+        )
+        return True
+
+    async def resume_task(self, task_id: str) -> bool:
+        """Resume a task previously paused by the user."""
+        context = self._active_tasks.get(task_id)
+        if not context or context.execution_record.status != TaskExecutionStatus.PAUSED:
+            return False
+        context.execution_record.status = TaskExecutionStatus.RUNNING
+        context.pause_event.set()
+        await self._state_manager.save_execution_state(context)
+        await event_bus.publish_sync(
+            "task.resumed",
+            "orchestrator",
+            {"task_id": task_id, "status": TaskExecutionStatus.RUNNING.value},
+        )
+        return True
+
     async def cancel_task(self, task_id: str) -> bool:
-        """Cancel a running task."""
+        """Cancel a running, paused, or approval-waiting task."""
         context = self._active_tasks.get(task_id)
         if context:
             context.cancelled = True
             context.execution_record.status = TaskExecutionStatus.CANCELLED
             context.pause_event.set()
+            context.approval_event.set()
             await self._state_manager.save_execution_state(context)
+            await event_bus.publish_sync(
+                "task.cancelled",
+                "orchestrator",
+                {"task_id": task_id, "status": TaskExecutionStatus.CANCELLED.value},
+            )
+            return True
+
+        # A task may still be queued before its background worker has created
+        # an orchestration context. Persist cancellation so the worker exits
+        # before planning or executing any actions.
+        record = await self._state_manager.get_execution_record(task_id)
+        if record and record.status in (TaskExecutionStatus.PENDING, TaskExecutionStatus.QUEUED):
+            self._cancelled_task_ids.add(task_id)
+            record.status = TaskExecutionStatus.CANCELLED
+            record.completed_at = int(datetime.now().timestamp() * 1000)
+            await self._state_manager.save_execution_record(record)
+            await event_bus.publish_sync(
+                "task.cancelled",
+                "orchestrator",
+                {"task_id": task_id, "status": TaskExecutionStatus.CANCELLED.value},
+            )
             return True
         return False
 
@@ -548,7 +668,7 @@ class ExecutionOrchestrator:
             if not still_pending:
                 context.execution_record.status = TaskExecutionStatus.RUNNING
                 context.execution_record.completed_at = None
-                context.pause_event.set()
+                context.approval_event.set()
                 correlation_id = str(uuid.uuid4())
                 try:
                     await self._execute_plan(context, correlation_id)
@@ -576,7 +696,7 @@ class ExecutionOrchestrator:
             context.execution_record.error = f"Action denied: {reason or 'User denied action'}"
             context.execution_record.completed_at = int(datetime.now().timestamp() * 1000)
             context.cancelled = True
-            context.pause_event.set()
+            context.approval_event.set()
             await event_bus.publish_sync(
                 "task.failed",
                 "orchestrator",
@@ -595,20 +715,38 @@ class ExecutionOrchestrator:
         # Check persisted state
         return await self._state_manager.get_execution_record(task_id)
     
-    async def resume_from_checkpoint(self, checkpoint_id: str) -> TaskExecutionRecord:
-        """Resume task execution from a checkpoint."""
+    async def resume_from_checkpoint(self, checkpoint_id: str) -> Optional[TaskExecutionRecord]:
+        """Resume a paused in-process task after validating its persisted checkpoint.
+
+        The active scheduler context is required because execution plans are not
+        yet persisted as restart-recoverable snapshots.
+        """
         checkpoint = await self._state_manager.get_checkpoint(checkpoint_id)
         if not checkpoint:
-            raise ValueError(f"Checkpoint not found: {checkpoint_id}")
-        
-        # Reconstruct context from checkpoint
-        # This would restore the execution state and continue
-        # For now, return the record
-        record = await self._state_manager.get_execution_record(checkpoint.task_id)
-        if not record:
-            raise ValueError(f"Execution record not found for checkpoint: {checkpoint_id}")
-        
-        return record
+            return None
+
+        context = self._active_tasks.get(checkpoint.task_id)
+        if not context:
+            # Do not claim a restart recovery that cannot be reconstructed safely.
+            return None
+        if context.execution_record.status != TaskExecutionStatus.PAUSED:
+            return None
+        if not context.checkpoints or context.checkpoints[-1].checkpoint_id != checkpoint_id:
+            return None
+
+        context.execution_record.status = TaskExecutionStatus.RUNNING
+        context.pause_event.set()
+        await self._state_manager.save_execution_state(context)
+        await event_bus.publish_sync(
+            "task.resumed",
+            "orchestrator",
+            {
+                "task_id": checkpoint.task_id,
+                "checkpoint_id": checkpoint_id,
+                "status": TaskExecutionStatus.RUNNING.value,
+            },
+        )
+        return context.execution_record
 
 
 # Global orchestrator instance
