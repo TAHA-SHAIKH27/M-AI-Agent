@@ -95,6 +95,7 @@ class ChatRepository @Inject constructor(
         return try {
             if (webSocketClient.isConnected) {
                 // Send via WebSocket for streaming
+                saveMessage(message, "user")
                 webSocketClient.sendChat(message, conversationId)
                 Result.success(ChatResponse(
                     content = "",
@@ -221,6 +222,7 @@ class ChatRepository @Inject constructor(
                 when (message) {
                     is WSMessage.Chat -> {
                         val chatMsg = ChatMessage(role = "assistant", content = message.payload.message)
+                        saveMessage(chatMsg.content, "assistant")
                         onMessage(chatMsg)
                     }
                     is WSMessage.TaskProgress -> {
