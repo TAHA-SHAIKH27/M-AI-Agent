@@ -48,7 +48,7 @@ fun SettingsScreen(
             settingsPreferences.apiKey
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe({ value: String? -> apiKey = value ?: "" }, { error: Throwable -> errorMessage = error.message })
+                .subscribe({ value: String -> apiKey = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
