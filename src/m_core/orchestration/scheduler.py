@@ -301,6 +301,43 @@ class TaskScheduler:
         
         return levels
     
+    def _is_retry_safe(self, scheduled: ScheduledTask) -> bool:
+        """Allow retries only for idempotent or explicitly retry-safe actions."""
+        if scheduled.subtask.metadata.get("retry_safe") is True:
+            return True
+        if scheduled.routing_decision.target_type in (
+            RoutingTargetType.AGENT,
+            RoutingTargetType.MODEL_PROVIDER,
+        ):
+            return True
+        if scheduled.routing_decision.target_type != RoutingTargetType.TOOL:
+            return False
+        try:
+            tool = tool_registry.get_tool(scheduled.routing_decision.target_id)
+            manifest = tool.manifest
+            risk = getattr(manifest, "risk_level", "")
+            risk_value = str(getattr(risk, "value", risk)).lower()
+            return risk_value == "low" and not bool(getattr(manifest, "requires_approval", False))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_retryable_error(error: Optional[str]) -> bool:
+        """Avoid retrying permission, approval, validation, and lookup failures."""
+        message = (error or "").lower()
+        permanent_markers = (
+            "consent required",
+            "approval_required",
+            "approval required",
+            "permission denied",
+            "not found",
+            "invalid",
+            "validation",
+            "forbidden",
+            "denied",
+        )
+        return not any(marker in message for marker in permanent_markers)
+
     async def _execute_subtask(
         self,
         scheduled: ScheduledTask,
@@ -308,66 +345,103 @@ class TaskScheduler:
         correlation_id: str,
         progress_callback: Optional[Callable],
     ) -> Dict[str, Any]:
-        """Execute a single subtask."""
+        """Execute a subtask with bounded retries for safe, repeatable operations."""
         subtask = scheduled.subtask
         routing = scheduled.routing_decision
         record = scheduled.record
-        
+
         record.status = SubtaskExecutionStatus.RUNNING
         record.started_at = int(datetime.now().timestamp() * 1000)
         record.assigned_target_type = routing.target_type.value
         record.assigned_target_id = routing.target_id
-        
+
         start_time = time.time()
-        
+        retry_safe = self._is_retry_safe(scheduled)
+        max_attempts = 1 + (max(0, subtask.max_retries) if retry_safe else 0)
+        result: Dict[str, Any] = {"success": False, "error": "Execution did not run"}
+
         try:
-            # Execute based on target type
-            if routing.target_type == RoutingTargetType.TOOL:
-                result = await self._execute_tool(
-                    routing.target_id, subtask, task_context, correlation_id
+            for attempt in range(max_attempts):
+                record.retry_count = attempt
+                try:
+                    if routing.target_type == RoutingTargetType.TOOL:
+                        result = await self._execute_tool(
+                            routing.target_id, subtask, task_context, correlation_id
+                        )
+                    elif routing.target_type == RoutingTargetType.AGENT:
+                        result = await self._execute_agent(
+                            routing.target_id, subtask, task_context, correlation_id
+                        )
+                    elif routing.target_type == RoutingTargetType.MODEL_PROVIDER:
+                        result = await self._execute_model(
+                            routing.target_id, subtask, task_context, correlation_id
+                        )
+                    else:
+                        result = {
+                            "success": False,
+                            "error": f"Unknown target type: {routing.target_type}",
+                        }
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    result = {"success": False, "error": str(exc)}
+
+                if result.get("success"):
+                    break
+                if (
+                    attempt + 1 >= max_attempts
+                    or not self._is_retryable_error(result.get("error"))
+                ):
+                    break
+
+                record.status = SubtaskExecutionStatus.RETRYING
+                record.retry_count = attempt + 1
+                await event_bus.publish_sync(
+                    "task.retry",
+                    "scheduler",
+                    {
+                        "task_id": getattr(task_context, "task_id", None),
+                        "subtask_id": subtask.id,
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "error": result.get("error"),
+                    },
+                    correlation_id=correlation_id,
                 )
-            elif routing.target_type == RoutingTargetType.AGENT:
-                result = await self._execute_agent(
-                    routing.target_id, subtask, task_context, correlation_id
-                )
-            elif routing.target_type == RoutingTargetType.MODEL_PROVIDER:
-                result = await self._execute_model(
-                    routing.target_id, subtask, task_context, correlation_id
-                )
-            else:
-                result = {"success": False, "error": f"Unknown target type: {routing.target_type}"}
-            
-            record.status = SubtaskExecutionStatus.COMPLETED if result.get("success") else SubtaskExecutionStatus.FAILED
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 4.0))
+
+            record.status = (
+                SubtaskExecutionStatus.COMPLETED
+                if result.get("success")
+                else SubtaskExecutionStatus.FAILED
+            )
             record.result = result.get("result")
             record.error = result.get("error")
             record.execution_time_ms = (time.time() - start_time) * 1000
             record.completed_at = int(datetime.now().timestamp() * 1000)
-            
-            # Log audit
+
             audit_logger.log_tool(
                 tool=routing.target_id,
                 success=result.get("success", False),
                 duration_ms=record.execution_time_ms,
                 correlation_id=correlation_id,
             )
-            
             return result
-            
+
         except asyncio.CancelledError:
             record.status = SubtaskExecutionStatus.CANCELLED
             record.error = "Cancelled"
             record.completed_at = int(datetime.now().timestamp() * 1000)
             raise
-            
-        except Exception as e:
-            logger.error(f"Subtask execution failed: {e}")
+
+        except Exception as exc:
+            logger.error("Subtask execution failed", error=str(exc), subtask_id=subtask.id)
             record.status = SubtaskExecutionStatus.FAILED
-            record.error = str(e)
+            record.error = str(exc)
             record.execution_time_ms = (time.time() - start_time) * 1000
             record.completed_at = int(datetime.now().timestamp() * 1000)
-            
-            return {"success": False, "error": str(e)}
-    
+            return {"success": False, "error": str(exc)}
+
     async def _execute_tool(
         self,
         tool_name: str,
