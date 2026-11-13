@@ -9,11 +9,16 @@ on:
     branches:
       - master
 
+concurrency:
+  group: m-android-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   android:
+    timeout-minutes: 25
     name: Android debug APK compile
     runs-on: ubuntu-latest
     steps:
