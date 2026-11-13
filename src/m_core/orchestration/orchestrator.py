@@ -257,10 +257,14 @@ class ExecutionOrchestrator:
 
             # Final evaluation
             evaluation = await self._evaluator.evaluate_task(orch_context)
-            
-            # Update final status
-            execution_record.status = self._evaluation_to_status(evaluation.overall_result)
-            execution_record.result = evaluation.consolidated_result
+
+            # Cancellation may arrive while verification is running.
+            if orch_context.cancelled:
+                execution_record.status = TaskExecutionStatus.CANCELLED
+                execution_record.error = "Task cancelled"
+            else:
+                execution_record.status = self._evaluation_to_status(evaluation.overall_result)
+                execution_record.result = evaluation.consolidated_result
             execution_record.completed_at = int(datetime.now().timestamp() * 1000)
             
             # Save final state
