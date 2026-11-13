@@ -21,7 +21,6 @@ from ..planning.schemas import (
     ExecutionPlan, Subtask, TaskAnalysis,
     ApprovalStatus,
 )
-from .schemas import TaskExecutionStatus
 
 logger = get_logger(__name__)
 
