@@ -1,7 +1,6 @@
 """Chat routes for REST API."""
 import uuid
 import structlog
-from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from typing import Optional, List, Dict, Any
 
