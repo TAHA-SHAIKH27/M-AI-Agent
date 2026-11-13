@@ -46,7 +46,7 @@ object ApiModule {
     @Provides
     @ServerUrl
     fun provideServerUrl(settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences): String =
-        settingsPreferences.serverUrl.blockingGet().let { if (it.endsWith("/")) it else "$it/" }
+        settingsPreferences.serverUrl.blockingGet().trimEnd('/')
 
     @Provides
     @ApiKey
@@ -61,7 +61,7 @@ object ApiModule {
         @ServerUrl baseUrl: String
     ): Retrofit {
         return Retrofit.Builder()
-            .baseUrl(baseUrl)
+            .baseUrl("$baseUrl/api/v1/")
             .client(okHttpClient)
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
