@@ -1,6 +1,7 @@
 package com.massistant.android.ui.theme
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -167,3 +168,6 @@ val AppTypography = Typography(
         letterSpacing = 0.5.sp
     )
 )
+/** Semantic warning color used for elevated-risk UI states. */
+val ColorScheme.warning: Color
+    get() = Color(0xFFF59E0B)
