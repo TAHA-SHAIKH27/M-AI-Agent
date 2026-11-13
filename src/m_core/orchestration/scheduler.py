@@ -309,8 +309,8 @@ class TaskScheduler:
                 )
                 running[tid] = task
             
-            if running and not ready:
-                # Wait for at least one task to complete
+            if running and (not ready or available_slots <= 0):
+                # Avoid a busy loop while tasks are running or concurrency is full.
                 await asyncio.sleep(0.1)
         
         return results
