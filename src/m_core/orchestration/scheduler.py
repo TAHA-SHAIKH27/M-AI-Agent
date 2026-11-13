@@ -151,6 +151,8 @@ class TaskScheduler:
             )
             results[scheduled.subtask.id] = result
             self._completed_tasks[scheduled.subtask.id] = result
+            if progress_callback:
+                await progress_callback(scheduled.subtask.id, scheduled.record)
         
         return results
     
@@ -191,6 +193,8 @@ class TaskScheduler:
                     result = {"success": False, "error": str(result)}
                 results[scheduled.subtask.id] = result
                 self._completed_tasks[scheduled.subtask.id] = result
+                if progress_callback:
+                    await progress_callback(scheduled.subtask.id, scheduled.record)
         
         return results
     
