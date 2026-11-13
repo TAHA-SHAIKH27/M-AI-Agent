@@ -23,7 +23,7 @@ object ApiModule {
     @Singleton
     fun provideOkHttpClient(): OkHttpClient {
         val logging = HttpLoggingInterceptor()
-        logging.level = if (true) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
+        logging.level = if (com.massistant.android.BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
 
         return OkHttpClient.Builder()
             .addInterceptor(logging)
