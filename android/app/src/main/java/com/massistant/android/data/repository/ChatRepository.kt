@@ -271,7 +271,7 @@ class ChatRepository @Inject constructor(
             val response = apiService.voiceSpeak(VoiceSpeakRequest(
                 text = text,
                 voice = voice
-            )).await()
+            ))
             if (response.isSuccessful) Result.success(response.body()!!)
             else Result.failure(Exception("HTTP ${response.code()}"))
         } catch (e: Exception) {
