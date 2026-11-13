@@ -7,7 +7,6 @@ from m_core.orchestration import orchestrator
 from m_core.orchestration.orchestrator import OrchestrationContext
 from m_core.orchestration.scheduler import ScheduledTask, TaskScheduler
 from m_core.orchestration.schemas import (
-    CheckpointType,
     SubtaskExecutionRecord,
     SubtaskExecutionStatus,
     TaskExecutionRecord,
