@@ -67,6 +67,7 @@ class ExecutionOrchestrator:
         self._recovery_manager = recovery_manager
         self._evaluator = evaluator
         self._active_tasks: Dict[str, OrchestrationContext] = {}
+        self._cancelled_task_ids: set[str] = set()
         self._execution_hooks: List[Callable] = []
         self._initialized = False
     
@@ -134,7 +135,8 @@ class ExecutionOrchestrator:
             execution_record.execution_plan_id = ""
             execution_record.conversation_id = conversation_id
             execution_record.user_id = user_id
-            if execution_record.status == TaskExecutionStatus.CANCELLED:
+            if execution_record.status == TaskExecutionStatus.CANCELLED or task_id in self._cancelled_task_ids:
+                self._cancelled_task_ids.discard(task_id)
                 return execution_record
             execution_record.status = TaskExecutionStatus.QUEUED
             execution_record.error = None
@@ -157,6 +159,15 @@ class ExecutionOrchestrator:
             
             # Phase 3: Routing
             routing_plan = await enhanced_router.create_routing_plan(execution_plan)
+
+            # Close the race where cancellation arrives while planning is in progress.
+            if task_id in self._cancelled_task_ids:
+                self._cancelled_task_ids.discard(task_id)
+                execution_record.status = TaskExecutionStatus.CANCELLED
+                execution_record.error = "Task cancelled before execution"
+                execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._state_manager.save_execution_record(execution_record)
+                return execution_record
             
             # Update execution record with plan IDs
             execution_record.execution_plan_id = execution_plan.task_id
@@ -566,6 +577,7 @@ class ExecutionOrchestrator:
         # before planning or executing any actions.
         record = await self._state_manager.get_execution_record(task_id)
         if record and record.status in (TaskExecutionStatus.PENDING, TaskExecutionStatus.QUEUED):
+            self._cancelled_task_ids.add(task_id)
             record.status = TaskExecutionStatus.CANCELLED
             record.completed_at = int(datetime.now().timestamp() * 1000)
             await self._state_manager.save_execution_record(record)
