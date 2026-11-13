@@ -16,6 +16,7 @@ from m_core.tools import tool_registry
 from m_core.tools.schemas import ToolExecutionContext
 from m_core.security import consent_manager, ConsentScope
 from m_core.api.rest.routes.tasks import router as tasks_router
+from m_core.core.events import event_bus
 
 async def test_application_automation():
     """TEST 1: Application Automation"""
@@ -59,6 +60,9 @@ async def test_application_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
+    if not result.success:
+        print(f"   FAIL: window enumeration failed: {result.error}")
+        return False
     if result.success:
         notepad_windows = [w for w in result.result['windows'] if 'notepad' in w['process_name'].lower()]
         print(f"   Notepad windows found: {len(notepad_windows)}")
@@ -67,8 +71,8 @@ async def test_application_automation():
             notepad_windows = [w for w in result.result['windows'] if 'notepad' in w['title'].lower()]
             print(f"   Notepad windows by title: {len(notepad_windows)}")
         if not notepad_windows:
-            print("   WARNING: Notepad window not found by process name or title, but process was launched")
-            # Don't fail - the process was launched successfully
+            print("   FAIL: Notepad process launched but no matching window was found")
+            return False
     
     # 3. Request approval before keyboard input
     print("\n3. Testing approval requirement for keyboard input...")
@@ -118,13 +122,15 @@ async def test_application_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        text = result.result['text']
-        print(f"   OCR text length: {len(text)}")
-        if "Phase 6 Acceptance Test" in text:
-            print("   PASS: Text found in OCR")
-        else:
-            print("   WARNING: Exact test text not found in OCR (may be font/position issue)")
+    if not result.success:
+        print(f"   FAIL: OCR failed: {result.error}")
+        return False
+    text = result.result['text']
+    print(f"   OCR text length: {len(text)}")
+    if "Phase 6 Acceptance Test" not in text:
+        print("   FAIL: Typed acceptance text was not detected by OCR")
+        return False
+    print("   PASS: Typed acceptance text found in OCR")
     
     # 6. Verify screen state
     print("\n6. Verifying screen state...")
@@ -139,8 +145,9 @@ async def test_application_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        print(f"   Verification passed: {result.result['passed']}")
+    if not result.success or not result.result.get("passed", False):
+        print(f"   FAIL: Screen verification did not pass: {result.error or result.result}")
+        return False
     
     print("\nTEST 1: Application Automation - PASS")
     return True
@@ -282,11 +289,16 @@ async def test_visual_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        matches = result.result['matches']
-        print(f"   Matches found: {len(matches)}")
-        for m in matches[:3]:
-            print(f"   Match at ({m['x']}, {m['y']}) size {m['width']}x{m['height']} conf {m['confidence']:.2f}")
+    if not result.success:
+        print(f"   FAIL: Visual find failed: {result.error}")
+        return False
+    matches = result.result['matches']
+    print(f"   Matches found: {len(matches)}")
+    if not matches:
+        print("   FAIL: Expected visible text was not found")
+        return False
+    for m in matches[:3]:
+        print(f"   Match at ({m['x']}, {m['y']}) size {m['width']}x{m['height']} conf {m['confidence']:.2f}")
     
     # 4. Report result
     print("\n4. Reporting visual verification...")
@@ -301,9 +313,11 @@ async def test_visual_automation():
     )
     result = await tool.execute(context)
     print(f"   Success: {result.success}")
-    if result.success:
-        print(f"   Verification passed: {result.result['passed']}")
-        print(f"   Confidence: {result.result['confidence']:.2f}")
+    if not result.success or not result.result.get("passed", False):
+        print(f"   FAIL: Visual verification failed: {result.error or result.result}")
+        return False
+    print(f"   Verification passed: {result.result['passed']}")
+    print(f"   Confidence: {result.result['confidence']:.2f}")
     
     print("\nTEST 3: Visual Automation - PASS")
     return True
@@ -370,13 +384,15 @@ async def test_task_orchestration():
     
     # 8. Completion reporting
     print("\n8. Completion reporting...")
-    if execution_record.status == TaskExecutionStatus.COMPLETED:
-        print("  PASS: Task completed successfully")
-    elif execution_record.status == TaskExecutionStatus.FAILED:
-        print(f"  FAIL: Task failed - {execution_record.error}")
+    if execution_record.status != TaskExecutionStatus.COMPLETED:
+        print(f"  FAIL: Task did not complete: {execution_record.status.value} ({execution_record.error})")
         return False
-    else:
-        print(f"  Status: {execution_record.status.value}")
+    if completed != len(execution_record.subtask_records) or failed:
+        print("  FAIL: One or more subtasks did not complete successfully")
+        return False
+    if not execution_record.result:
+        print("  FAIL: Completed task has no consolidated result")
+        return False
     
     print("\nTEST 4: Task Orchestration - PASS")
     return True
@@ -416,8 +432,10 @@ async def test_human_intervention():
         
         # Check status after approval
         record = await orchestrator.get_task_status(execution_record.task_id)
-        if record:
-            print(f"   Status after approval: {record.status.value}")
+        if not record or record.status == TaskExecutionStatus.AWAITING_APPROVAL:
+            print("   FAIL: Approved task did not leave the approval-waiting state")
+            return False
+        print(f"   Status after approval: {record.status.value}")
         
         # 3. Test rejection on new task
         print("\n3. Testing approval rejection...")
@@ -436,8 +454,13 @@ async def test_human_intervention():
             )
             print(f"   Rejection success: {success}")
             record = await orchestrator.get_task_status(execution_record2.task_id)
-            if record:
-                print(f"   Status after rejection: {record.status.value}")
+            if not record or record.status != TaskExecutionStatus.FAILED:
+                print("   FAIL: Rejected task was not marked failed")
+                return False
+            print(f"   Status after rejection: {record.status.value}")
+        else:
+            print("   FAIL: Rejection test task did not request approval")
+            return False
         
         # 4. Task pause (via cancellation)
         print("\n4. Testing task cancellation (pause)...")
@@ -447,12 +470,20 @@ async def test_human_intervention():
             user_id="test-user",
             context={}
         )
-        if execution_record3.status != TaskExecutionStatus.AWAITING_APPROVAL:
-            success = await orchestrator.cancel_task(execution_record3.task_id)
-            print(f"   Cancel success: {success}")
-            record = await orchestrator.get_task_status(execution_record3.task_id)
-            if record:
-                print(f"   Status after cancel: {record.status.value}")
+        if execution_record3.status not in (
+            TaskExecutionStatus.AWAITING_APPROVAL,
+            TaskExecutionStatus.RUNNING,
+            TaskExecutionStatus.QUEUED,
+        ):
+            print(f"   FAIL: Cancellation test task was not cancellable: {execution_record3.status.value}")
+            return False
+        success = await orchestrator.cancel_task(execution_record3.task_id)
+        record = await orchestrator.get_task_status(execution_record3.task_id)
+        if not success or not record or record.status != TaskExecutionStatus.CANCELLED:
+            print("   FAIL: Task cancellation did not persist the cancelled state")
+            return False
+        print(f"   Cancel success: {success}")
+        print(f"   Status after cancel: {record.status.value}")
         
         print("\nTEST 5: Human Intervention - PASS")
         return True
