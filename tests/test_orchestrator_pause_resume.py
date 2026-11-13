@@ -135,6 +135,7 @@ async def test_cancel_task_wakes_pause_and_approval_gates():
         pause_event=pause_gate,
         approval_event=approval_gate,
     )
+    context.pause_event.clear()
     orchestrator._active_tasks[task_id] = context
     try:
         assert await orchestrator.cancel_task(task_id) is True
