@@ -18,6 +18,7 @@ async def test_scheduler_retries_transient_agent_failure_and_emits_event(monkeyp
         description="temporary agent failure",
         assigned_agent="test-agent",
         max_retries=1,
+        metadata={"retry_safe": True},
     )
     decision = RoutingDecision(
         subtask_id=subtask.id,
