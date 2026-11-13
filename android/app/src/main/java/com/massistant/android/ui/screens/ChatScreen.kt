@@ -83,7 +83,7 @@ fun ChatScreen(
     }
 
     val handleReject = {
-        approvalPayload.value?.let { payload ->
+        approvalPayload?.let { payload ->
             repository.sendApproval(payload.task_id, payload.subtask_id, false)
         }
         showApprovalDialog = false
