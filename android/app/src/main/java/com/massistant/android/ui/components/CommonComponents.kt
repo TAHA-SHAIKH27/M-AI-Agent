@@ -1,9 +1,10 @@
 package com.massistant.android.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.TextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
@@ -24,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.massistant.android.ui.theme.warning
 
 @Composable
 fun MessageBubble(
@@ -132,10 +134,13 @@ fun ChatInput(
                 .padding(horizontal = 8.dp),
             singleLine = true,
             placeholder = { Text("Type a message…", color = colors.onSurfaceVariant.copy(alpha = 0.6f)) },
-            colors = TextFieldDefaults.textFieldColors(
-                containerColor = colors.surfaceVariant,
-                textColor = colors.onSurface,
-                placeholderColor = colors.onSurfaceVariant.copy(alpha = 0.6f)
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = colors.surfaceVariant,
+                unfocusedContainerColor = colors.surfaceVariant,
+                focusedTextColor = colors.onSurface,
+                unfocusedTextColor = colors.onSurface,
+                focusedPlaceholderColor = colors.onSurfaceVariant.copy(alpha = 0.6f),
+                unfocusedPlaceholderColor = colors.onSurfaceVariant.copy(alpha = 0.6f)
             ),
             shape = RoundedCornerShape(24.dp)
         )
