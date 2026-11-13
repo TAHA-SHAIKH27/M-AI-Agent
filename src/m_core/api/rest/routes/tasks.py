@@ -537,7 +537,7 @@ async def list_checkpoints(
 
 
 @router.post(
-    "/{task_id}/resume",
+    "/{task_id}/checkpoints/{checkpoint_id}/resume",
     summary="Resume task from checkpoint",
     description="Resume task execution from a specific checkpoint",
 )
