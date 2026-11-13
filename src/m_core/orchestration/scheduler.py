@@ -182,10 +182,21 @@ class TaskScheduler:
         """Execute independent subtasks in parallel."""
         task_key = getattr(execution_plan, "task_id", "scheduler-default")
         completed_tasks = self._completed_tasks.setdefault(task_key, {})
-        # Group by dependency level
-        levels = self._compute_dependency_levels(scheduled_tasks)
+        # Group by dependency level. Invalid graphs must fail closed rather
+        # than executing steps whose prerequisites are missing or cyclic.
         results = {}
-        
+        try:
+            levels = self._compute_dependency_levels(scheduled_tasks)
+        except ValueError as exc:
+            for tid, scheduled in scheduled_tasks.items():
+                scheduled.record.status = SubtaskExecutionStatus.FAILED
+                scheduled.record.error = str(exc)
+                scheduled.record.completed_at = int(datetime.now().timestamp() * 1000)
+                results[tid] = {"success": False, "error": str(exc)}
+                if progress_callback:
+                    await progress_callback(tid, scheduled.record)
+            return results
+
         for level in levels:
             if cancellation_check and cancellation_check():
                 break
@@ -329,8 +340,7 @@ class TaskScheduler:
                     level.append(tid)
             
             if not level:
-                # Circular dependency or missing dependency - execute remaining
-                level = list(remaining)
+                raise ValueError("Unmet or cyclic subtask dependencies")
             
             for tid in level:
                 remaining.remove(tid)
