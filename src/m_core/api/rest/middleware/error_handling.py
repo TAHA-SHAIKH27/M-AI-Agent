@@ -1,7 +1,7 @@
 """Error handling middleware for REST API."""
 import traceback
 import structlog
-from typing import Callable
+from typing import Callable, Optional
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
