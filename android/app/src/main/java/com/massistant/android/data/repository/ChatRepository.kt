@@ -14,13 +14,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.Result
 import retrofit2.Response
 
 @Singleton
-class ChatRepository @Inject constructor(
+class ChatRepository(
     private val apiService: ApiService,
     private val webSocketClient: WebSocketClient,
     private val settingsPreferences: SettingsPreferences,
