@@ -3,6 +3,7 @@ import asyncio
 import json
 import uuid
 import structlog
+import msgspec
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +62,7 @@ class ExecutionStateManager:
                 data = json.loads(exec_file.read_text(encoding="utf-8"))
                 for task_id, record_data in data.items():
                     # Convert to TaskExecutionRecord
-                    self._execution_records[task_id] = TaskExecutionRecord(**record_data)
+                    self._execution_records[task_id] = msgspec.convert(record_data, type=TaskExecutionRecord)
             
             # Load subtask records
             subtask_dir = self.data_dir / "subtasks"
@@ -70,7 +71,7 @@ class ExecutionStateManager:
                     task_id = task_file.stem
                     data = json.loads(task_file.read_text(encoding="utf-8"))
                     self._subtask_records[task_id] = {
-                        sid: SubtaskExecutionRecord(**sdata)
+                        sid: msgspec.convert(sdata, type=SubtaskExecutionRecord)
                         for sid, sdata in data.items()
                     }
             
@@ -79,7 +80,7 @@ class ExecutionStateManager:
             if checkpoint_dir.exists():
                 for cp_file in checkpoint_dir.glob("*.json"):
                     data = json.loads(cp_file.read_text(encoding="utf-8"))
-                    checkpoint = Checkpoint(**data)
+                    checkpoint = msgspec.convert(data, type=Checkpoint)
                     self._checkpoints[checkpoint.checkpoint_id] = checkpoint
                     
                     if checkpoint.task_id not in self._task_checkpoints:
