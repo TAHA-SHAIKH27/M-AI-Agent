@@ -12,7 +12,7 @@ from ..model_providers import provider_factory
 from ..agents import agent_registry
 from ..agents.schemas import AgentManifest
 from ..tools import tool_registry
-from ..tools.schemas import ToolManifest, ToolRiskLevel
+from ..tools.schemas import ToolRiskLevel
 from ..security import consent_manager
 from ..core.events import event_bus
 from ..utils.logging import get_logger
@@ -75,7 +75,7 @@ class ControlMethodSelector:
     ]
 
     def __init__(self):
-        self._tool_cache: Dict[str, ToolManifest] = {}
+        self._tool_cache: Dict[str, Dict[str, Any]] = {}
         self._initialized = False
     
     async def initialize(self):
