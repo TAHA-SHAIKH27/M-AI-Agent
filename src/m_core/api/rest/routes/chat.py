@@ -1,13 +1,15 @@
 """Chat routes for REST API."""
 import uuid
 import structlog
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from typing import Optional, List, Dict, Any
 
 from m_core.agents import agent_registry, GeneralAssistantAgent
 from m_core.agents.schemas import AgentRequest, AgentMessage
 from m_core.orchestration import orchestrator
-from m_core.orchestration.schemas import TaskExecutionStatus, SubtaskExecutionStatus
+from m_core.orchestration.state_manager import state_manager
+from m_core.orchestration.schemas import TaskExecutionStatus, SubtaskExecutionStatus, TaskExecutionRecord
 from m_core.core.events import event_bus
 from m_core.security import consent_manager
 from m_core.utils.logging import get_logger
@@ -313,64 +315,42 @@ async def create_task(
     )
     
     try:
-        # Execute task through orchestrator
-        execution_record = await orchestrator.execute_task(
+        await orchestrator.initialize()
+        task_id = str(uuid.uuid4())[:8]
+        execution_record = TaskExecutionRecord(
+            task_id=task_id,
+            execution_plan_id="",
+            conversation_id=conv_id,
+            user_id=client.host,
+            status=TaskExecutionStatus.QUEUED,
+        )
+        await state_manager.save_execution_record(execution_record)
+
+        task_context = {
+            "allowed_tools": request.allowed_tools,
+            "blocked_tools": request.blocked_tools,
+            "max_tool_calls": request.max_tool_calls,
+            "temperature": request.temperature,
+            "max_tokens": request.max_tokens,
+            "metadata": request.metadata,
+        }
+        background_tasks.add_task(
+            orchestrator.execute_task,
             user_request=request.message,
             conversation_id=conv_id,
             user_id=client.host,
-            context={
-                "allowed_tools": request.allowed_tools,
-                "blocked_tools": request.blocked_tools,
-                "max_tool_calls": request.max_tool_calls,
-                "temperature": request.temperature,
-                "max_tokens": request.max_tokens,
-                "metadata": request.metadata,
-            },
+            context=task_context,
+            task_id=task_id,
         )
-        
-        # Convert to API response
-        subtasks = []
-        for sr in execution_record.subtask_records:
-            subtasks.append({
-                "subtask_id": sr.subtask_id,
-                "status": sr.status.value,
-                "assigned_target_type": sr.assigned_target_type,
-                "assigned_target_id": sr.assigned_target_id,
-                "started_at": sr.started_at,
-                "completed_at": sr.completed_at,
-                "result": sr.result,
-                "error": sr.error,
-                "retry_count": sr.retry_count,
-                "dependencies": sr.dependencies,
-                "execution_time_ms": sr.execution_time_ms,
-            })
-        
-        # Map status
-        status_map = {
-            TaskExecutionStatus.PENDING: TaskStatus.PENDING,
-            TaskExecutionStatus.QUEUED: TaskStatus.QUEUED,
-            TaskExecutionStatus.RUNNING: TaskStatus.RUNNING,
-            TaskExecutionStatus.WAITING: TaskStatus.WAITING,
-            TaskExecutionStatus.PAUSED: TaskStatus.PAUSED,
-            TaskExecutionStatus.COMPLETED: TaskStatus.COMPLETED,
-            TaskExecutionStatus.FAILED: TaskStatus.FAILED,
-            TaskExecutionStatus.CANCELLED: TaskStatus.CANCELLED,
-            TaskExecutionStatus.REPLANNING: TaskStatus.REPLANNING,
-            TaskExecutionStatus.AWAITING_APPROVAL: TaskStatus.AWAITING_APPROVAL,
-        }
-        
+
+        # Return immediately so the client can poll, pause, resume, or cancel.
         return TaskInfo(
-            task_id=execution_record.task_id,
-            status=status_map.get(execution_record.status, TaskStatus.PENDING),
-            conversation_id=execution_record.conversation_id,
+            task_id=task_id,
+            status=TaskStatus.QUEUED,
+            conversation_id=conv_id,
             created_at=execution_record.created_at,
-            started_at=execution_record.started_at,
-            completed_at=execution_record.completed_at,
-            error=execution_record.error,
-            error_code=execution_record.error_code,
-            subtasks=subtasks,
-            result=execution_record.result,
-            metadata=execution_record.metadata,
+            subtasks=[],
+            metadata={"background_execution": True},
         )
         
     except Exception as e:
