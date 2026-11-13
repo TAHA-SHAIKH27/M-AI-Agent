@@ -73,7 +73,7 @@ class ToolRegistry(Registry):
             "tool_class": tool_class,
             "manifest": manifest_obj,
             "enabled": enabled,
-        }, overwrite=overwrite)
+        }, enabled=enabled, overwrite=overwrite)
         
         logger.info(f"Registered tool: {name} (risk: {manifest_obj.risk_level})")
     
@@ -101,11 +101,15 @@ class ToolRegistry(Registry):
     
     def get_tool(self, name: str) -> BaseTool:
         """Get a tool instance by name."""
+        # Check the live registry entry before consulting the instance cache:
+        # disabling a tool must immediately prevent use of an already-created instance.
+        entry = self._entries.get(name)
+        if entry is None or not entry.enabled:
+            raise ToolNotFoundError(f"Tool '{name}' not found or disabled")
         if name in self._instances:
             return self._instances[name]
         
         # Try to get from registry
-        entry = self._entries.get(name)
         if entry and entry.enabled:
             manifest = entry.metadata.get("manifest")
             tool_class = entry.metadata.get("tool_class")

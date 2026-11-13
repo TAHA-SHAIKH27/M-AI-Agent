@@ -1,0 +1,35 @@
+name: M Android build
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: m-android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    timeout-minutes: 25
+    name: Android debug APK compile
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build Android app
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleDebug

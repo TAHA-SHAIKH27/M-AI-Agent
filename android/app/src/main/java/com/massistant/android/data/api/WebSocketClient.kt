@@ -8,6 +8,9 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.*
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
@@ -17,7 +20,7 @@ class WebSocketClient(
     private val apiKey: String? = null,
     private val json: Json = Json { 
         ignoreUnknownKeys = true
-        useArrayPolymorphism = true
+        useArrayPolymorphism = false
         classDiscriminator = "type"
     }
 ) {
@@ -55,8 +58,9 @@ class WebSocketClient(
         connectionStateChannel.send(ConnectionState.Connecting)
         
         val request = Request.Builder()
-            .url("$serverUrl/ws")
+            .url("$serverUrl/api/v1/ws")
             .addHeader("User-Agent", "M-Android-Companion/1.0")
+            .apply { if (!apiKey.isNullOrBlank()) addHeader("Authorization", "Bearer $apiKey") }
             .build()
         
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
@@ -72,7 +76,7 @@ class WebSocketClient(
                     val message = json.decodeFromString<WSMessage>(text)
                     messageChannel.trySend(message)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse message: $text", e)
+                    Log.e(TAG, "Failed to parse incoming WebSocket message", e)
                 }
             }
 
@@ -131,22 +135,21 @@ class WebSocketClient(
 
     fun sendApproval(taskId: String, subtaskId: String, approved: Boolean, reason: String? = null) {
         // Server expects WSMessage.ApprovalResponse or similar - send as raw JSON for now
-        val jsonString = json.encodeToString(
-            mapOf(
-                "type" to "approval_response",
-                "payload" to mapOf(
-                    "task_id" to taskId,
-                    "subtask_id" to subtaskId,
-                    "approved" to approved,
-                    "reason" to reason
-                )
-            )
-        )
-        webSocket?.send(jsonString)
+        val payload = kotlinx.serialization.json.buildJsonObject {
+            put("type", JsonPrimitive("approval_response"))
+            putJsonObject("payload") {
+                put("task_id", JsonPrimitive(taskId))
+                put("subtask_id", JsonPrimitive(subtaskId))
+                put("approved", JsonPrimitive(approved))
+                if (reason == null) put("reason", kotlinx.serialization.json.JsonNull)
+                else put("reason", JsonPrimitive(reason))
+            }
+        }
+        webSocket?.send(payload.toString())
     }
 
     fun sendPing() {
-        webSocket?.send(json.encodeToString(WSMessage.Ping()))
+        webSocket?.send(json.encodeToString(WSMessage.Ping))
     }
 
     private fun sendMessage(message: WSMessage) {

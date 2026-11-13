@@ -13,25 +13,20 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
-import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.Result
 import retrofit2.Response
 
 @Singleton
-class ChatRepository @Inject constructor(
+class ChatRepository(
     private val apiService: ApiService,
     private val webSocketClient: WebSocketClient,
     private val settingsPreferences: SettingsPreferences,
     private val database: ConversationDatabase
 ) {
     private val _connectionState = MutableStateFlow<WebSocketClient.ConnectionState>(WebSocketClient.ConnectionState.Disconnected())
-    val connectionState = _connectionState
-        .asStateFlow()
-        .distinctUntilChanged()
+    val connectionState = _connectionState.asStateFlow()
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages = _messages.asStateFlow()
@@ -51,7 +46,7 @@ class ChatRepository @Inject constructor(
         }
     }
 
-    private fun loadMessages(conversationId: String) {
+    private suspend fun loadMessages(conversationId: String) {
         val messages = database.conversationDao().getMessages(conversationId)
             .map { it.toChatMessage() }
         _messages.value = messages
@@ -99,6 +94,7 @@ class ChatRepository @Inject constructor(
         return try {
             if (webSocketClient.isConnected) {
                 // Send via WebSocket for streaming
+                saveMessage(message, "user")
                 webSocketClient.sendChat(message, conversationId)
                 Result.success(ChatResponse(
                     content = "",
@@ -111,17 +107,18 @@ class ChatRepository @Inject constructor(
                     message = message,
                     conversation_id = conversationId,
                     stream = false
-                )).await()
+                ))
                 if (response.isSuccessful) {
-                    response.body()?.let { body ->
-                        if (body.conversation_id.isNotBlank()) {
-                            _currentConversationId.value = body.conversation_id
-                        }
+                    val body = response.body()
+                    if (body != null) {
+                        if (body.conversation_id.isNotBlank()) _currentConversationId.value = body.conversation_id
                         saveMessage(message, "user")
                         saveMessage(body.content, "assistant")
                         updateConversation(body.conversation_id, message)
+                        Result.success(body)
+                    } else {
+                        Result.failure(Exception("Empty response body"))
                     }
-                    Result.success(body!!)
                 } else {
                     Result.failure(Exception("HTTP ${response.code()}"))
                 }
@@ -132,20 +129,37 @@ class ChatRepository @Inject constructor(
     }
 
     private fun saveMessage(content: String, role: String) {
-        val conversationId = _currentConversationId.value ?: return
+        val conversationId = _currentConversationId.value ?: "conv_${System.currentTimeMillis()}".also {
+            _currentConversationId.value = it
+        }
         val message = ChatMessage(role = role, content = content)
         _messages.value = _messages.value + message
-        
-        // Save to database
+
+        // Ensure a conversation exists before persisting its first message.
         CoroutineScope(Dispatchers.IO).launch {
-            database.conversationDao().insertMessages(listOf(
-                MessageEntity(
-                    conversationId = conversationId,
-                    role = role,
-                    content = content,
-                    timestamp = message.timestamp
+            val dao = database.conversationDao()
+            if (dao.getConversation(conversationId) == null) {
+                dao.insertConversation(
+                    ConversationEntity(
+                        id = conversationId,
+                        title = content.take(50).ifBlank { "New Conversation" },
+                        lastMessage = content,
+                        messageCount = 0,
+                        updatedAt = message.timestamp,
+                        createdAt = message.timestamp
+                    )
                 )
-            ))
+            }
+            dao.insertMessages(
+                listOf(
+                    MessageEntity(
+                        conversationId = conversationId,
+                        role = role,
+                        content = content,
+                        timestamp = message.timestamp
+                    )
+                )
+            )
         }
     }
 
@@ -167,9 +181,10 @@ class ChatRepository @Inject constructor(
     private fun loadConversationHistory() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val response = apiService.getConversations(20, 0).await()
+                val response = apiService.getConversations(20, 0)
                 if (response.isSuccessful) {
-                    response.body()?.conversations?.forEach { conv ->
+                    response.body()?.conversations?.let { conversations ->
+                    for (conv in conversations) {
                         val entity = ConversationEntity(
                             id = conv.id,
                             title = conv.title,
@@ -179,6 +194,7 @@ class ChatRepository @Inject constructor(
                             createdAt = conv.updated_at // approximate
                         )
                         database.conversationDao().insertConversation(entity)
+                    }
                     }
                 }
             } catch (e: Exception) {
@@ -222,6 +238,7 @@ class ChatRepository @Inject constructor(
                 when (message) {
                     is WSMessage.Chat -> {
                         val chatMsg = ChatMessage(role = "assistant", content = message.payload.message)
+                        saveMessage(chatMsg.content, "assistant")
                         onMessage(chatMsg)
                     }
                     is WSMessage.TaskProgress -> {
@@ -249,7 +266,7 @@ class ChatRepository @Inject constructor(
     // Voice methods
     suspend fun voiceRecord(duration: Int = 10): Result<VoiceRecordResponse> {
         return try {
-            val response = apiService.voiceRecord(VoiceRecordRequest(duration_seconds = duration)).await()
+            val response = apiService.voiceRecord(VoiceRecordRequest(duration_seconds = duration))
             if (response.isSuccessful) Result.success(response.body()!!)
             else Result.failure(Exception("HTTP ${response.code()}"))
         } catch (e: Exception) {
@@ -259,7 +276,7 @@ class ChatRepository @Inject constructor(
 
     suspend fun voiceTranscribe(audioFile: String): Result<VoiceTranscribeResponse> {
         return try {
-            val response = apiService.voiceTranscribe(VoiceTranscribeRequest(audio_file = audioFile)).await()
+            val response = apiService.voiceTranscribe(VoiceTranscribeRequest(audio_file = audioFile))
             if (response.isSuccessful) Result.success(response.body()!!)
             else Result.failure(Exception("HTTP ${response.code()}"))
         } catch (e: Exception) {
@@ -272,7 +289,7 @@ class ChatRepository @Inject constructor(
             val response = apiService.voiceSpeak(VoiceSpeakRequest(
                 text = text,
                 voice = voice
-            )).await()
+            ))
             if (response.isSuccessful) Result.success(response.body()!!)
             else Result.failure(Exception("HTTP ${response.code()}"))
         } catch (e: Exception) {

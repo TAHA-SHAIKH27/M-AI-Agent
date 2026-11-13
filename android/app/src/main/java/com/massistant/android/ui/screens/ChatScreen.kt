@@ -1,10 +1,14 @@
 package com.massistant.android.ui.screens
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -20,8 +24,10 @@ import com.massistant.android.ui.components.ChatInput
 import com.massistant.android.ui.components.ConnectionStatusIndicator
 import com.massistant.android.ui.components.LoadingOverlay
 import com.massistant.android.ui.components.MessageList
+import com.massistant.android.ui.components.MessageBubble
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     repository: ChatRepository,
@@ -29,18 +35,16 @@ fun ChatScreen(
 ) {
     val messages by repository.messages.collectAsState()
     val connectionState by repository.connectionState.collectAsState()
-    val showApprovalDialog by remember { mutableStateOf(false) }
-    val approvalPayload by remember { mutableStateOf<ApprovalRequiredPayload?>(null) }
-    val isProcessing by remember { mutableStateOf(false) }
-    val isVoiceRecording by remember { mutableStateOf(false) }
-    val scaffoldState = remember { ScaffoldState() }
+    var showApprovalDialog by remember { mutableStateOf(false) }
+    var approvalPayload by remember { mutableStateOf<ApprovalRequiredPayload?>(null) }
+    var isProcessing by remember { mutableStateOf(false) }
+    var isVoiceRecording by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     // Handle incoming WebSocket messages
     LaunchedEffect(repository) {
         repository.handleIncomingMessages(
-            onMessage = { msg ->
-                // Assistant message received via WebSocket
-            },
+            onMessage = { /* repository updates its StateFlow */ },
             onTaskProgress = { progress ->
                 // Update UI with task progress
             },
@@ -48,19 +52,18 @@ fun ChatScreen(
                 // Task completed
             },
             onApprovalRequired = { payload ->
-                approvalPayload.value = payload
-                showApprovalDialog.value = true
+                approvalPayload = payload
+                showApprovalDialog = true
             }
         )
     }
 
-    val sendMessage = { text: String ->
+    val sendMessage: (String) -> Unit = { text ->
         isProcessing = true
-        val userMessage = ChatMessage(role = "user", content = text)
-        // Optimistically add user message
-        // The actual message will be added via repository.handleIncomingMessages
-        // or we can add it here for immediate feedback
-        repository.sendMessage(text)
+        scope.launch {
+            try { repository.sendMessage(text) } finally { isProcessing = false }
+        }
+        Unit
     }
 
     val startVoiceRecording = {
@@ -74,28 +77,27 @@ fun ChatScreen(
     }
 
     val handleApprove = {
-        approvalPayload.value?.let { payload ->
+        approvalPayload?.let { payload ->
             repository.sendApproval(payload.task_id, payload.subtask_id, true)
         }
-        showApprovalDialog.value = false
-        approvalPayload.value = null
+        showApprovalDialog = false
+        approvalPayload = null
     }
 
     val handleReject = {
-        approvalPayload.value?.let { payload ->
+        approvalPayload?.let { payload ->
             repository.sendApproval(payload.task_id, payload.subtask_id, false)
         }
-        showApprovalDialog.value = false
-        approvalPayload.value = null
+        showApprovalDialog = false
+        approvalPayload = null
     }
 
     Scaffold(
-        scaffoldState = scaffoldState,
         topBar = {
             TopAppBar(
                 title = { Text("M Companion") },
                 navigationIcon = { 
-                    IconButton(onClick = { scaffoldState.drawerState.open() }) {
+                    IconButton(onClick = onSettingsClick) {
                         Icon(Icons.Default.Menu, contentDescription = "Menu")
                     }
                 },
@@ -108,9 +110,6 @@ fun ChatScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             )
         },
-        drawerContent = {
-            DrawerContent(onSettingsClick = onSettingsClick)
-        }
     ) { padding ->
         Box(
             modifier = Modifier
@@ -157,7 +156,7 @@ fun ChatScreen(
                     onVoiceClick = {
                         if (isVoiceRecording) stopVoiceRecording() else startVoiceRecording()
                     },
-                    enabled = connectionState is WebSocketClient.ConnectionState.Connected
+                    enabled = true
                 )
             }
 
@@ -168,7 +167,7 @@ fun ChatScreen(
 
             // Approval dialog
             if (showApprovalDialog) {
-                approvalPayload.value?.let { payload ->
+                approvalPayload?.let { payload ->
                     ApprovalDialog(
                         payload = payload,
                         onApprove = handleApprove,
@@ -264,7 +263,7 @@ fun NavigationItem(
             .fillMaxWidth()
             .padding(vertical = 12.dp)
             .background(
-                if (selected) colors.primaryContainer else colors.transparent,
+                if (selected) colors.primaryContainer else Color.Transparent,
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
             )
             .clickable(onClick = onClick),

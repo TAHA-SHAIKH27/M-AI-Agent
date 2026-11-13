@@ -6,53 +6,49 @@ import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewModelScope
 import com.massistant.android.data.repository.ChatRepository
+import com.massistant.android.data.preferences.SettingsPreferences
 import com.massistant.android.ui.theme.MTheme
 import dagger.hilt.android.AndroidEntryPoint
+import dagger.hilt.android.lifecycle.HiltViewModel
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.schedulers.Schedulers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
-
-    @Inject
-    lateinit var chatRepository: ChatRepository
-
-    @Inject
-    lateinit var settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences
-
+    @Inject lateinit var chatRepository: ChatRepository
+    @Inject lateinit var settingsPreferences: SettingsPreferences
     private val viewModel: MainViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             MTheme {
-                Surface(modifier = androidx.compose.foundation.layout.Modifier.fillMaxSize()) {
-                    MainScreen(
-                        chatRepository = chatRepository,
-                        settingsPreferences = settingsPreferences,
-                        viewModel = viewModel
-                    )
+                Surface(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
+                    MainScreen(chatRepository, settingsPreferences, viewModel)
                 }
             }
         }
-        
-        // Auto-connect if enabled
         lifecycleScope.launch {
             try {
+                chatRepository.initialize()
                 val autoConnect = settingsPreferences.autoConnect
                     .subscribeOn(Schedulers.io())
                     .observeOn(AndroidSchedulers.mainThread())
                     .blockingGet()
-                if (autoConnect) {
-                    viewModel.connect()
-                }
-            } catch (e: Exception) {
-                // Ignore, don't auto-connect on error
+                if (autoConnect) viewModel.connect()
+            } catch (_: Exception) {
+                // Keep the app usable when settings cannot be read.
             }
         }
     }
@@ -61,53 +57,31 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun MainScreen(
     chatRepository: ChatRepository,
-    settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences,
+    settingsPreferences: SettingsPreferences,
     viewModel: MainViewModel
 ) {
     val currentScreen by viewModel.currentScreen.collectAsState()
-    
     when (currentScreen) {
-        Screen.Chat -> ChatScreen(
-            repository = chatRepository,
-            onSettingsClick = { viewModel.navigateTo(Screen.Settings) }
-        )
-        Screen.Settings -> SettingsScreen(
-            settingsPreferences = settingsPreferences,
-            onBack = { viewModel.navigateTo(Screen.Chat) }
-        )
+        Screen.Chat -> ChatScreen(chatRepository) { viewModel.navigateTo(Screen.Settings) }
+        Screen.Settings -> SettingsScreen(settingsPreferences) { viewModel.navigateTo(Screen.Chat) }
     }
 }
 
-enum class Screen {
-    Chat, Settings
-}
+enum class Screen { Chat, Settings }
 
-@dagger.hilt.android.lifecycle.HiltViewModel
+@HiltViewModel
 class MainViewModel @Inject constructor(
     private val chatRepository: ChatRepository
-) : androidx.lifecycle.ViewModel() {
-
-    private val _currentScreen = androidx.compose.runtime.MutableStateFlow(Screen.Chat)
+) : ViewModel() {
+    private val _currentScreen = MutableStateFlow(Screen.Chat)
     val currentScreen = _currentScreen.asStateFlow()
 
-    fun navigateTo(screen: Screen) {
-        _currentScreen.value = screen
-    }
-
-    fun connect() {
-        androidx.lifecycle.viewmodel.viewModelScope.launch {
-            chatRepository.connect()
-        }
-    }
-
-    fun disconnect() {
-        androidx.lifecycle.viewmodel.viewModelScope.launch {
-            chatRepository.disconnect()
-        }
-    }
+    fun navigateTo(screen: Screen) { _currentScreen.value = screen }
+    fun connect() { viewModelScope.launch { chatRepository.connect() } }
+    fun disconnect() { viewModelScope.launch { chatRepository.disconnect() } }
 
     override fun onCleared() {
-        super.onCleared()
         disconnect()
+        super.onCleared()
     }
 }

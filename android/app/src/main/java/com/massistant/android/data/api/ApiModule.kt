@@ -1,6 +1,5 @@
 package com.massistant.android.data.api
 
-import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import dagger.Module
@@ -10,7 +9,6 @@ import dagger.hilt.components.SingletonComponent
 import javax.inject.Qualifier
 import javax.inject.Singleton
 import kotlin.annotation.AnnotationRetention
-import kotlin.annotation.RetentionPolicy
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -25,7 +23,7 @@ object ApiModule {
     @Singleton
     fun provideOkHttpClient(): OkHttpClient {
         val logging = HttpLoggingInterceptor()
-        logging.level = HttpLoggingInterceptor.Level.BODY
+        logging.level = if (com.massistant.android.BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
 
         return OkHttpClient.Builder()
             .addInterceptor(logging)
@@ -44,6 +42,16 @@ object ApiModule {
     }
 
     @Provides
+    @ServerUrl
+    fun provideServerUrl(settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences): String =
+        settingsPreferences.serverUrl.blockingGet().trimEnd('/')
+
+    @Provides
+    @ApiKey
+    fun provideApiKey(settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences): String =
+        settingsPreferences.apiKey.blockingGet().orEmpty()
+
+    @Provides
     @Singleton
     fun provideRetrofit(
         okHttpClient: OkHttpClient,
@@ -51,7 +59,7 @@ object ApiModule {
         @ServerUrl baseUrl: String
     ): Retrofit {
         return Retrofit.Builder()
-            .baseUrl(baseUrl)
+            .baseUrl("$baseUrl/api/v1/")
             .client(okHttpClient)
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
@@ -68,11 +76,11 @@ object ApiModule {
     fun provideWebSocketClient(
         okHttpClient: OkHttpClient,
         @ServerUrl baseUrl: String,
-        @ApiKey apiKey: String?
+        @ApiKey apiKey: String
     ): WebSocketClient {
         // Convert HTTP URL to WebSocket URL
         val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://")
-        return WebSocketClient(wsUrl, apiKey)
+        return WebSocketClient(wsUrl, apiKey.takeIf { it.isNotBlank() })
     }
 }
 

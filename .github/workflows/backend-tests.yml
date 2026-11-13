@@ -4,16 +4,20 @@ on:
   push:
     branches:
       - master
-      - "repair/**"
   pull_request:
     branches:
       - master
+
+concurrency:
+  group: m-backend-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   tests:
+    timeout-minutes: 20
     name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:

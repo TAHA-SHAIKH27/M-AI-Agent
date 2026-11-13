@@ -5,35 +5,35 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.massistant.android.data.preferences.SettingsPreferences
-import com.massistant.android.ui.theme.MTheme
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import io.reactivex.rxjava3.core.Completable
-import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.schedulers.Schedulers
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     settingsPreferences: SettingsPreferences,
     onBack: () -> Unit
 ) {
-    val serverUrl by remember { mutableStateOf("") }
-    val apiKey by remember { mutableStateOf("") }
-    val autoConnect by remember { mutableStateOf(true) }
-    val voiceEnabled by remember { mutableStateOf(false) }
-    val notificationsEnabled by remember { mutableStateOf(true) }
-    val isLoading by remember { mutableStateOf(false) }
-    val errorMessage by remember { mutableStateOf<String?>(null) }
-    val successMessage by remember { mutableStateOf<String?>(null) }
+    var serverUrl by remember { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
+    var autoConnect by remember { mutableStateOf(true) }
+    var voiceEnabled by remember { mutableStateOf(false) }
+    var notificationsEnabled by remember { mutableStateOf(true) }
+    var isLoading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var successMessage by remember { mutableStateOf<String?>(null) }
     val disposables = remember { CompositeDisposable() }
+    DisposableEffect(disposables) { onDispose { disposables.clear() } }
 
     // Load current settings
     LaunchedEffect(Unit) {
@@ -41,41 +41,41 @@ fun SettingsScreen(
             settingsPreferences.serverUrl
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { serverUrl = it }
+                .subscribe({ value: String -> serverUrl = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.apiKey
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { apiKey = it ?: "" }
+                .subscribe({ value: String -> apiKey = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.autoConnect
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { autoConnect = it }
+                .subscribe({ value: Boolean -> autoConnect = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.voiceEnabled
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { voiceEnabled = it }
+                .subscribe({ value: Boolean -> voiceEnabled = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.notificationsEnabled
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { notificationsEnabled = it }
+                .subscribe({ value: Boolean -> notificationsEnabled = value }, { error: Throwable -> errorMessage = error.message })
         )
     }
 
     val scope = rememberCoroutineScope()
     
-    val saveSettings = {
+    val saveSettings: () -> Unit = {
         isLoading = true
         errorMessage = null
         successMessage = null
@@ -102,7 +102,7 @@ fun SettingsScreen(
                     .subscribeOn(Schedulers.io())
                     .blockingAwait()
                 
-                successMessage = "Settings saved successfully"
+                successMessage = "Settings saved. Restart M to apply server URL and API key changes."
             } catch (e: Exception) {
                 errorMessage = "Failed to save settings: ${e.message}"
             } finally {
@@ -140,7 +140,7 @@ fun SettingsScreen(
                         value = serverUrl,
                         onValueChange = { serverUrl = it },
                         label = { Text("Server URL") },
-                        placeholder = { Text("http://192.168.1.100:8000") },
+                        placeholder = { Text("http://192.168.1.100:8080") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
@@ -155,7 +155,7 @@ fun SettingsScreen(
                         placeholder = { Text("Enter API key if required") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        visualTransformation = androidx.compose.foundation.text.PasswordVisualTransformation()
+                        visualTransformation = PasswordVisualTransformation()
                     )
                 }
             }
@@ -256,21 +256,5 @@ fun SettingsScreen(
                 Text("Test Connection")
             }
         }
-    }
-}
-
-@Composable
-fun SettingsScreenPreview() {
-    MTheme {
-        SettingsScreen(
-            settingsPreferences = object : SettingsPreferences(null) {
-                override suspend fun updateServerUrl(url: String) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateApiKey(key: String?) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateAutoConnect(enabled: Boolean) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateVoiceEnabled(enabled: Boolean) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateNotificationsEnabled(enabled: Boolean) = kotlin.coroutines.EmptyCoroutineContext
-            },
-            onBack = {}
-        )
     }
 }

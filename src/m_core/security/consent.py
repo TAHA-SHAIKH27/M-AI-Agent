@@ -143,6 +143,7 @@ class ConsentManager:
     def _save(self) -> None:
         """Save consents to file."""
         try:
+            self._consent_file.parent.mkdir(parents=True, exist_ok=True)
             data = {cap: record.to_dict() for cap, record in self._consents.items()}
             self._consent_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception as e:

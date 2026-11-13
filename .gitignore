@@ -86,3 +86,20 @@ secrets.yaml
 # Local config
 local.yaml
 config.local.yaml
+# Android / Gradle
+.gradle/
+**/.gradle/
+local.properties
+**/local.properties
+build/
+**/build/
+
+# Runtime state and local databases
+data/consents.json
+data/orchestration/
+data/checkpoints/
+data/runtime/
+test_chroma/
+
+# Local vector database test artifacts
+data/test_chroma/
