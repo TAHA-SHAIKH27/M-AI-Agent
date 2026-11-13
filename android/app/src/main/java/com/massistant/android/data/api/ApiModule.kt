@@ -1,6 +1,5 @@
 package com.massistant.android.data.api
 
-import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import dagger.Module
@@ -10,7 +9,6 @@ import dagger.hilt.components.SingletonComponent
 import javax.inject.Qualifier
 import javax.inject.Singleton
 import kotlin.annotation.AnnotationRetention
-import kotlin.annotation.RetentionPolicy
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
