@@ -430,6 +430,9 @@ async def test_human_intervention():
             reason="User approved"
         )
         print(f"   Approval success: {success}")
+        if not success:
+            print("   FAIL: Approval action was rejected by the orchestrator")
+            return False
         
         # Check status after approval
         record = await orchestrator.get_task_status(execution_record.task_id)
@@ -455,7 +458,7 @@ async def test_human_intervention():
             )
             print(f"   Rejection success: {success}")
             record = await orchestrator.get_task_status(execution_record2.task_id)
-            if not record or record.status != TaskExecutionStatus.FAILED:
+            if not success or not record or record.status != TaskExecutionStatus.FAILED:
                 print("   FAIL: Rejected task was not marked failed")
                 return False
             print(f"   Status after rejection: {record.status.value}")
@@ -463,8 +466,8 @@ async def test_human_intervention():
             print("   FAIL: Rejection test task did not request approval")
             return False
         
-        # 4. Task pause (via cancellation)
-        print("\n4. Testing task cancellation (pause)...")
+        # 4. Task cancellation
+        print("\n4. Testing task cancellation...")
         execution_record3 = await orchestrator.execute_task(
             user_request="Open Notepad",
             conversation_id="accept-hi-3",
