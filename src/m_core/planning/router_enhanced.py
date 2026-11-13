@@ -267,7 +267,8 @@ class EnhancedIntelligentRouter:
                 # fallback for tasks that need an agent or lack a usable tool.
                 selected_tool = selection["primary_tool"]
                 use_selected_tool = (
-                    selected_tool != "general_assistant"
+                    decision.target_type != RoutingTargetType.TOOL
+                    and selected_tool != "general_assistant"
                     and self._selector._check_tool_available(selected_tool)
                 )
                 target_type = RoutingTargetType.TOOL if use_selected_tool else decision.target_type
