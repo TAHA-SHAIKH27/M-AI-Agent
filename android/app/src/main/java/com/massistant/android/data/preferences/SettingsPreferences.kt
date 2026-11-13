@@ -1,11 +1,10 @@
 package com.massistant.android.data.preferences
 
 import android.content.Context
-import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.core.PreferencesKeys
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.preferencesKey
-import androidx.datastore.preferences.rxjava3.RxDataStore
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.rxjava3.RxPreferenceDataStoreBuilder
 import androidx.datastore.rxjava3.data
 import androidx.datastore.rxjava3.updateData
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -18,15 +17,15 @@ import javax.inject.Singleton
 class SettingsPreferences @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
-    private val dataStore = RxDataStore(context, "m_companion_settings")
+    private val dataStore = RxPreferenceDataStoreBuilder(context, "m_companion_settings").build()
 
     companion object {
-        val SERVER_URL = preferencesKey<String>("server_url")
-        val API_KEY = preferencesKey<String>("api_key")
-        val AUTO_CONNECT = preferencesKey<Boolean>("auto_connect")
-        val VOICE_ENABLED = preferencesKey<Boolean>("voice_enabled")
-        val NOTIFICATIONS_ENABLED = preferencesKey<Boolean>("notifications_enabled")
-        val THEME_MODE = preferencesKey<Int>("theme_mode") // 0=system, 1=light, 2=dark
+        val SERVER_URL = stringPreferencesKey("server_url")
+        val API_KEY = stringPreferencesKey("api_key")
+        val AUTO_CONNECT = booleanPreferencesKey("auto_connect")
+        val VOICE_ENABLED = booleanPreferencesKey("voice_enabled")
+        val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
+        val THEME_MODE = intPreferencesKey("theme_mode") // 0=system, 1=light, 2=dark
     }
 
     val serverUrl: Single<String> = dataStore.data
