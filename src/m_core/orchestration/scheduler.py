@@ -84,6 +84,9 @@ class TaskScheduler:
     ) -> Dict[str, Dict[str, Any]]:
         """Execute a plan with dependency-aware scheduling."""
         
+        # Results are scoped to one plan; never reuse dependency state across tasks.
+        self._completed_tasks.clear()
+
         # Build routing decision map
         routing_map = {d.subtask_id: d for d in routing_plan.decisions}
         
@@ -263,6 +266,22 @@ class TaskScheduler:
                 if deps_met:
                     ready.append(tid)
             
+            if not ready and not running and pending:
+                # No dependency can be satisfied: report a cycle or missing dependency
+                # instead of spinning forever.
+                for tid in list(pending):
+                    scheduled = scheduled_tasks[tid]
+                    scheduled.record.status = SubtaskExecutionStatus.FAILED
+                    scheduled.record.error = "Unmet or cyclic subtask dependencies"
+                    scheduled.record.completed_at = int(datetime.now().timestamp() * 1000)
+                    failure = {"success": False, "error": scheduled.record.error}
+                    results[tid] = failure
+                    self._completed_tasks[tid] = failure
+                    if progress_callback:
+                        await progress_callback(tid, scheduled.record)
+                pending.clear()
+                break
+
             # Sort ready tasks by priority
             ready.sort(key=lambda tid: -scheduled_tasks[tid].subtask.priority)
             
