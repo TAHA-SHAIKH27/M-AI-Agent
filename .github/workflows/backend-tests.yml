@@ -43,6 +43,6 @@ jobs:
             python -m pip install -e .
           fi
       - name: Compile Python sources
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests acceptance_test.py
       - name: Run test suite
         run: python -m pytest tests/ -q --tb=short
