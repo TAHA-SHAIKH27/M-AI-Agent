@@ -495,11 +495,16 @@ class ExecutionOrchestrator:
             return False
         context.pause_event.clear()
         context.execution_record.status = TaskExecutionStatus.PAUSED
+        checkpoint = await self._create_checkpoint(context, CheckpointType.MANUAL)
         await self._state_manager.save_execution_state(context)
         await event_bus.publish_sync(
             "task.paused",
             "orchestrator",
-            {"task_id": task_id, "status": TaskExecutionStatus.PAUSED.value},
+            {
+                "task_id": task_id,
+                "status": TaskExecutionStatus.PAUSED.value,
+                "checkpoint_id": checkpoint.checkpoint_id,
+            },
         )
         return True
 
@@ -657,7 +662,7 @@ class ExecutionOrchestrator:
             return None
         if context.execution_record.status != TaskExecutionStatus.PAUSED:
             return None
-        if not any(cp.checkpoint_id == checkpoint_id for cp in context.checkpoints):
+        if not context.checkpoints or context.checkpoints[-1].checkpoint_id != checkpoint_id:
             return None
 
         context.execution_record.status = TaskExecutionStatus.RUNNING
