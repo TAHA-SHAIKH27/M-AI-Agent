@@ -219,6 +219,7 @@ async def get_task(
             TaskExecutionStatus.QUEUED: "queued",
             TaskExecutionStatus.RUNNING: "running",
             TaskExecutionStatus.WAITING: "waiting",
+            TaskExecutionStatus.PAUSED: "paused",
             TaskExecutionStatus.COMPLETED: "completed",
             TaskExecutionStatus.FAILED: "failed",
             TaskExecutionStatus.CANCELLED: "cancelled",
