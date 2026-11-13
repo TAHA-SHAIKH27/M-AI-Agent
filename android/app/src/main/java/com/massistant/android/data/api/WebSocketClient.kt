@@ -8,6 +8,9 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.*
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
@@ -133,13 +136,13 @@ class WebSocketClient(
     fun sendApproval(taskId: String, subtaskId: String, approved: Boolean, reason: String? = null) {
         // Server expects WSMessage.ApprovalResponse or similar - send as raw JSON for now
         val payload = kotlinx.serialization.json.buildJsonObject {
-            put("type", "approval_response")
+            put("type", JsonPrimitive("approval_response"))
             putJsonObject("payload") {
-                put("task_id", taskId)
-                put("subtask_id", subtaskId)
-                put("approved", approved)
+                put("task_id", JsonPrimitive(taskId))
+                put("subtask_id", JsonPrimitive(subtaskId))
+                put("approved", JsonPrimitive(approved))
                 if (reason == null) put("reason", kotlinx.serialization.json.JsonNull)
-                else put("reason", reason)
+                else put("reason", JsonPrimitive(reason))
             }
         }
         webSocket?.send(payload.toString())
