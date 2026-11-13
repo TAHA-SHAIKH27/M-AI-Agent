@@ -233,7 +233,17 @@ class ExecutionOrchestrator:
             
             # Execute the plan
             await self._execute_plan(orch_context, correlation_id)
-            
+
+            # Cancellation is cooperative at scheduler boundaries. Do not let
+            # the evaluator turn a cancelled partial run into "completed".
+            if orch_context.cancelled:
+                execution_record.status = TaskExecutionStatus.CANCELLED
+                execution_record.error = "Task cancelled"
+                execution_record.completed_at = int(datetime.now().timestamp() * 1000)
+                await self._state_manager.save_execution_state(orch_context)
+                await self._create_checkpoint(orch_context, CheckpointType.POST_EXECUTION)
+                return execution_record
+
             # Final evaluation
             evaluation = await self._evaluator.evaluate_task(orch_context)
             
