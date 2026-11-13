@@ -58,11 +58,12 @@ fun ChatScreen(
         )
     }
 
-    val sendMessage = { text: String ->
+    val sendMessage: (String) -> Unit = { text ->
         isProcessing = true
         scope.launch {
             try { repository.sendMessage(text) } finally { isProcessing = false }
         }
+        Unit
     }
 
     val startVoiceRecording = {
