@@ -23,10 +23,11 @@ from .schemas import (
     EvaluationResult,
 )
 from ..planning import (
-    planner, router, task_understanding,
+    planner, task_understanding,
     TaskAnalysis, ExecutionPlan, RoutingPlan, Subtask, TaskContext,
     TaskType, TaskComplexity,
 )
+from ..planning.router_enhanced import enhanced_router
 from ..planning.schemas import ApprovalStatus
 
 logger = get_logger(__name__)
@@ -138,7 +139,7 @@ class ExecutionOrchestrator:
             execution_plan = await planner.create_plan(analysis, task_context, user_request)
             
             # Phase 3: Routing
-            routing_plan = await router.create_routing_plan(execution_plan)
+            routing_plan = await enhanced_router.create_routing_plan(execution_plan)
             
             # Update execution record with plan IDs
             execution_record.execution_plan_id = execution_plan.task_id
