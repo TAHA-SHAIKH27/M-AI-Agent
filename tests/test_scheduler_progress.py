@@ -89,3 +89,35 @@ async def test_dependency_scheduler_fails_missing_dependencies_instead_of_spinni
     assert results["blocked"]["success"] is False
     assert "dependencies" in results["blocked"]["error"]
     assert record.status is SubtaskExecutionStatus.FAILED
+
+
+
+@pytest.mark.asyncio
+async def test_parallel_scheduler_fails_missing_dependencies_closed():
+    scheduler = TaskScheduler()
+    subtask = Subtask(
+        id="parallel-blocked",
+        name="parallel blocked",
+        description="missing prerequisite",
+        dependencies=["missing-prerequisite"],
+    )
+    decision = RoutingDecision(
+        subtask_id=subtask.id,
+        target_type=RoutingTargetType.AGENT,
+        target_id="test-agent",
+    )
+    record = SubtaskExecutionRecord(
+        subtask_id=subtask.id,
+        task_id="parallel-blocked-task",
+    )
+    scheduled = {
+        subtask.id: ScheduledTask(subtask, decision, record)
+    }
+
+    results = await scheduler._execute_parallel(
+        scheduled, None, None, "parallel-blocked-correlation", None, None
+    )
+
+    assert results[subtask.id]["success"] is False
+    assert "dependencies" in results[subtask.id]["error"]
+    assert record.status is SubtaskExecutionStatus.FAILED
