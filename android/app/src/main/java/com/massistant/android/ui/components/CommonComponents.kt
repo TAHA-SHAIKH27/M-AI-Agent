@@ -6,13 +6,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -90,6 +87,7 @@ fun MessageList(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatInput(
     onSend: (String) -> Unit,
@@ -167,13 +165,13 @@ fun ConnectionStatusIndicator(
 ) {
     val (icon, color, text) = when (state) {
         is com.massistant.android.data.api.WebSocketClient.ConnectionState.Connecting -> 
-            Icons.Default.Sync to MaterialTheme.colorScheme.warning to "Connecting…"
+            Triple(Icons.Default.Sync, MaterialTheme.colorScheme.warning, "Connecting…")
         is com.massistant.android.data.api.WebSocketClient.ConnectionState.Connected -> 
-            CheckCircle to MaterialTheme.colorScheme.tertiary to "Connected"
+            Triple(Icons.Default.CheckCircle, MaterialTheme.colorScheme.tertiary, "Connected")
         is com.massistant.android.data.api.WebSocketClient.ConnectionState.Disconnected -> 
-            WifiOff to MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f) to "Disconnected"
+            Triple(Icons.Default.WifiOff, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), "Disconnected")
         is com.massistant.android.data.api.WebSocketClient.ConnectionState.Error -> 
-            Error to MaterialTheme.colorScheme.error to "Error"
+            Triple(Icons.Default.Error, MaterialTheme.colorScheme.error, "Error")
     }
     
     Row(
