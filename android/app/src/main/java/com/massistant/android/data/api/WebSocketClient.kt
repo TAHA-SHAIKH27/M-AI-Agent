@@ -55,7 +55,7 @@ class WebSocketClient(
         connectionStateChannel.send(ConnectionState.Connecting)
         
         val request = Request.Builder()
-            .url("$serverUrl/ws")
+            .url("$serverUrl/api/v1/ws")
             .addHeader("User-Agent", "M-Android-Companion/1.0")
             .build()
         
