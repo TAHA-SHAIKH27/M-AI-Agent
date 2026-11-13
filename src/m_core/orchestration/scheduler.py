@@ -47,7 +47,7 @@ class TaskScheduler:
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._task_queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
-        self._completed_tasks: Dict[str, Dict[str, Any]] = {}
+        self._completed_tasks: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._initialized = False
     
     async def initialize(self) -> None:
@@ -84,8 +84,10 @@ class TaskScheduler:
     ) -> Dict[str, Dict[str, Any]]:
         """Execute a plan with dependency-aware scheduling."""
         
-        # Results are scoped to one plan; never reuse dependency state across tasks.
-        self._completed_tasks.clear()
+        # Keep dependency results isolated by task: the scheduler is shared by
+        # concurrent background executions.
+        task_key = getattr(execution_plan, "task_id", "scheduler-default")
+        self._completed_tasks[task_key] = {}
 
         # Build routing decision map
         routing_map = {d.subtask_id: d for d in routing_plan.decisions}
@@ -111,23 +113,25 @@ class TaskScheduler:
                 record=record,
             )
         
-        # Execute based on strategy
-        if execution_plan.strategy == ExecutionStrategy.SEQUENTIAL:
-            return await self._execute_sequential(
-                scheduled_tasks, execution_plan, task_context, correlation_id,
-                progress_callback, cancellation_check, pause_event
-            )
-        elif execution_plan.strategy == ExecutionStrategy.PARALLEL:
-            return await self._execute_parallel(
-                scheduled_tasks, execution_plan, task_context, correlation_id,
-                progress_callback, cancellation_check, pause_event
-            )
-        else:  # DEPENDENCY_AWARE
+        # Execute based on strategy and release task-local dependency state.
+        try:
+            if execution_plan.strategy == ExecutionStrategy.SEQUENTIAL:
+                return await self._execute_sequential(
+                    scheduled_tasks, execution_plan, task_context, correlation_id,
+                    progress_callback, cancellation_check, pause_event
+                )
+            elif execution_plan.strategy == ExecutionStrategy.PARALLEL:
+                return await self._execute_parallel(
+                    scheduled_tasks, execution_plan, task_context, correlation_id,
+                    progress_callback, cancellation_check, pause_event
+                )
             return await self._execute_dependency_aware(
                 scheduled_tasks, execution_plan, task_context, correlation_id,
                 progress_callback, cancellation_check, pause_event
             )
-    
+        finally:
+            self._completed_tasks.pop(task_key, None)
+
     async def _execute_sequential(
         self,
         scheduled_tasks: Dict[str, ScheduledTask],
@@ -139,6 +143,8 @@ class TaskScheduler:
         pause_event: Optional[asyncio.Event] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Execute subtasks sequentially."""
+        task_key = getattr(execution_plan, "task_id", "scheduler-default")
+        completed_tasks = self._completed_tasks.setdefault(task_key, {})
         results = {}
         
         # Sort by priority (highest first)
@@ -157,7 +163,7 @@ class TaskScheduler:
                 scheduled, task_context, correlation_id, progress_callback
             )
             results[scheduled.subtask.id] = result
-            self._completed_tasks[scheduled.subtask.id] = result
+            completed_tasks[scheduled.subtask.id] = result
             if progress_callback:
                 await progress_callback(scheduled.subtask.id, scheduled.record)
         
@@ -174,6 +180,8 @@ class TaskScheduler:
         pause_event: Optional[asyncio.Event] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Execute independent subtasks in parallel."""
+        task_key = getattr(execution_plan, "task_id", "scheduler-default")
+        completed_tasks = self._completed_tasks.setdefault(task_key, {})
         # Group by dependency level
         levels = self._compute_dependency_levels(scheduled_tasks)
         results = {}
@@ -202,7 +210,7 @@ class TaskScheduler:
                 if isinstance(result, Exception):
                     result = {"success": False, "error": str(result)}
                 results[scheduled.subtask.id] = result
-                self._completed_tasks[scheduled.subtask.id] = result
+                completed_tasks[scheduled.subtask.id] = result
                 if progress_callback:
                     await progress_callback(scheduled.subtask.id, scheduled.record)
         
@@ -219,6 +227,8 @@ class TaskScheduler:
         pause_event: Optional[asyncio.Event] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Execute subtasks respecting dependencies with max concurrency."""
+        task_key = getattr(execution_plan, "task_id", "scheduler-default")
+        completed_tasks = self._completed_tasks.setdefault(task_key, {})
         results = {}
         pending = set(scheduled_tasks.keys())
         running: Dict[str, asyncio.Task] = {}
@@ -244,10 +254,10 @@ class TaskScheduler:
                 try:
                     result = await task
                     results[tid] = result
-                    self._completed_tasks[tid] = result
+                    completed_tasks[tid] = result
                 except Exception as e:
                     results[tid] = {"success": False, "error": str(e)}
-                    self._completed_tasks[tid] = {"success": False, "error": str(e)}
+                    completed_tasks[tid] = {"success": False, "error": str(e)}
                 
                 pending.discard(tid)
                 
@@ -260,7 +270,7 @@ class TaskScheduler:
             for tid in list(pending):
                 scheduled = scheduled_tasks[tid]
                 deps_met = all(
-                    dep in self._completed_tasks and self._completed_tasks[dep].get("success")
+                    dep in completed_tasks and completed_tasks[dep].get("success")
                     for dep in scheduled.subtask.dependencies
                 )
                 if deps_met:
@@ -276,7 +286,7 @@ class TaskScheduler:
                     scheduled.record.completed_at = int(datetime.now().timestamp() * 1000)
                     failure = {"success": False, "error": scheduled.record.error}
                     results[tid] = failure
-                    self._completed_tasks[tid] = failure
+                    completed_tasks[tid] = failure
                     if progress_callback:
                         await progress_callback(tid, scheduled.record)
                 pending.clear()
