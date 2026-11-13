@@ -9,40 +9,40 @@ import retrofit2.http.*
 interface ApiService {
 
     // Health
-    @GET("/health")
+    @GET("health")
     suspend fun getHealth(): Response<HealthResponse>
 
-    @GET("/health/ready")
+    @GET("health/ready")
     suspend fun getReadiness(): Response<HealthResponse>
 
     // Settings
-    @GET("/settings")
+    @GET("settings")
     suspend fun getSettings(): Response<SettingsResponse>
 
     // Providers
-    @GET("/providers")
+    @GET("providers")
     suspend fun getProviders(): Response<List<ProviderSettings>>
 
     // Chat
-    @POST("/chat")
+    @POST("chat")
     suspend fun sendChat(@Body request: ChatRequest): Response<ChatResponse>
 
-    @POST("/chat/stream")
+    @POST("chat/stream")
     suspend fun sendChatStream(@Body request: ChatRequest): Response<ResponseBody>
 
     // Tools
-    @GET("/tools")
+    @GET("tools")
     suspend fun getTools(
         @Query("enabled_only") enabledOnly: Boolean = true,
         @Query("risk_level") riskLevel: String? = null,
         @Query("category") category: String? = null
     ): Response<ToolsResponse>
 
-    @GET("/tools/{tool_name}")
+    @GET("tools/{tool_name}")
     suspend fun getTool(@Path("tool_name") toolName: String): Response<ToolManifest>
 
     // Memory
-    @GET("/memory/search")
+    @GET("memory/search")
     suspend fun searchMemory(
         @Query("query") query: String,
         @Query("tier") tier: String? = null,
@@ -50,63 +50,63 @@ interface ApiService {
         @Query("offset") offset: Int = 0
     ): Response<Any>
 
-    @GET("/memory/{entry_id}")
+    @GET("memory/{entry_id}")
     suspend fun getMemoryEntry(@Path("entry_id") entryId: String): Response<Any>
 
-    @GET("/memory/conversations")
+    @GET("memory/conversations")
     suspend fun getConversations(
         @Query("limit") limit: Int = 20,
         @Query("offset") offset: Int = 0
     ): Response<ConversationHistoryResponse>
 
-    @GET("/memory/conversations/{conversation_id}")
+    @GET("memory/conversations/{conversation_id}")
     suspend fun getConversationDetail(@Path("conversation_id") conversationId: String): Response<ConversationDetail>
 
     // Voice Tools
-    @POST("/tools/voice_record")
+    @POST("tools/voice_record")
     suspend fun voiceRecord(@Body request: VoiceRecordRequest): Response<VoiceRecordResponse>
 
-    @POST("/tools/voice_transcribe")
+    @POST("tools/voice_transcribe")
     suspend fun voiceTranscribe(@Body request: VoiceTranscribeRequest): Response<VoiceTranscribeResponse>
 
-    @POST("/tools/voice_speak")
+    @POST("tools/voice_speak")
     suspend fun voiceSpeak(@Body request: VoiceSpeakRequest): Response<VoiceSpeakResponse>
 
-    @POST("/tools/wake_word_listen")
+    @POST("tools/wake_word_listen")
     suspend fun wakeWordListen(@Body request: WakeWordListenRequest): Response<WakeWordListenResponse>
 
     // Windows Automation Tools
-    @POST("/tools/app_launch")
+    @POST("tools/app_launch")
     suspend fun appLaunch(@Body request: Map<String, Any>): Response<Any>
 
-    @POST("/tools/app_control")
+    @POST("tools/app_control")
     suspend fun appControl(@Body request: Map<String, Any>): Response<Any>
 
-    @POST("/tools/powershell")
+    @POST("tools/powershell")
     suspend fun powershell(@Body request: Map<String, Any>): Response<Any>
 
-    @POST("/tools/process_list")
+    @POST("tools/process_list")
     suspend fun processList(@Body request: Map<String, Any>): Response<Any>
 
-    @POST("/tools/window_list")
+    @POST("tools/window_list")
     suspend fun windowList(@Body request: Map<String, Any>): Response<Any>
 
-    @POST("/tools/shortcut_create")
+    @POST("tools/shortcut_create")
     suspend fun shortcutCreate(@Body request: Map<String, Any>): Response<Any>
 
-    @POST("/tools/system_command")
+    @POST("tools/system_command")
     suspend fun systemCommand(@Body request: Map<String, Any>): Response<Any>
 
     // Task Management
-    @POST("/tasks")
+    @POST("tasks")
     suspend fun createTask(@Body request: Map<String, Any>): Response<Any>
 
-    @GET("/tasks/{task_id}")
+    @GET("tasks/{task_id}")
     suspend fun getTaskStatus(@Path("task_id") taskId: String): Response<TaskStatus>
 
-    @POST("/tasks/{task_id}/cancel")
+    @POST("tasks/{task_id}/cancel")
     suspend fun cancelTask(@Path("task_id") taskId: String): Response<Any>
 
-    @POST("/tasks/{task_id}/approve")
+    @POST("tasks/{task_id}/approve")
     suspend fun approveTask(@Path("task_id") taskId: String, @Body request: ApproveRequest): Response<Any>
 }
