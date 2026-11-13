@@ -58,7 +58,9 @@ class SettingsPreferences @Inject constructor(
     }
 
     fun updateApiKey(key: String?): Completable {
-        return dataStore.updateData { it[API_KEY] = key }.ignoreElement()
+        return dataStore.updateData { preferences ->
+            if (key == null) preferences.remove(API_KEY) else preferences[API_KEY] = key
+        }.ignoreElement()
     }
 
     fun updateAutoConnect(enabled: Boolean): Completable {
