@@ -146,7 +146,7 @@ class WebSocketClient(
     }
 
     fun sendPing() {
-        webSocket?.send(json.encodeToString(WSMessage.Ping()))
+        webSocket?.send(json.encodeToString(WSMessage.Ping))
     }
 
     private fun sendMessage(message: WSMessage) {
