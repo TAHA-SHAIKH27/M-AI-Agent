@@ -25,14 +25,14 @@ fun SettingsScreen(
     settingsPreferences: SettingsPreferences,
     onBack: () -> Unit
 ) {
-    val serverUrl by remember { mutableStateOf("") }
-    val apiKey by remember { mutableStateOf("") }
-    val autoConnect by remember { mutableStateOf(true) }
-    val voiceEnabled by remember { mutableStateOf(false) }
-    val notificationsEnabled by remember { mutableStateOf(true) }
-    val isLoading by remember { mutableStateOf(false) }
-    val errorMessage by remember { mutableStateOf<String?>(null) }
-    val successMessage by remember { mutableStateOf<String?>(null) }
+    var serverUrl by remember { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
+    var autoConnect by remember { mutableStateOf(true) }
+    var voiceEnabled by remember { mutableStateOf(false) }
+    var notificationsEnabled by remember { mutableStateOf(true) }
+    var isLoading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var successMessage by remember { mutableStateOf<String?>(null) }
     val disposables = remember { CompositeDisposable() }
 
     // Load current settings
@@ -256,21 +256,5 @@ fun SettingsScreen(
                 Text("Test Connection")
             }
         }
-    }
-}
-
-@Composable
-fun SettingsScreenPreview() {
-    MTheme {
-        SettingsScreen(
-            settingsPreferences = object : SettingsPreferences(null) {
-                override suspend fun updateServerUrl(url: String) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateApiKey(key: String?) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateAutoConnect(enabled: Boolean) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateVoiceEnabled(enabled: Boolean) = kotlin.coroutines.EmptyCoroutineContext
-                override suspend fun updateNotificationsEnabled(enabled: Boolean) = kotlin.coroutines.EmptyCoroutineContext
-            },
-            onBack = {}
-        )
     }
 }
