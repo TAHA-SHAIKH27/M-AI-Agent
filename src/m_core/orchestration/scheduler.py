@@ -305,11 +305,10 @@ class TaskScheduler:
         """Allow retries only for idempotent or explicitly retry-safe actions."""
         if scheduled.subtask.metadata.get("retry_safe") is True:
             return True
-        if scheduled.routing_decision.target_type in (
-            RoutingTargetType.AGENT,
-            RoutingTargetType.MODEL_PROVIDER,
-        ):
+        if scheduled.routing_decision.target_type == RoutingTargetType.MODEL_PROVIDER:
             return True
+        if scheduled.routing_decision.target_type == RoutingTargetType.AGENT:
+            return False
         if scheduled.routing_decision.target_type != RoutingTargetType.TOOL:
             return False
         try:
