@@ -3,6 +3,7 @@ import asyncio
 import json
 import uuid
 import structlog
+import msgspec
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +62,13 @@ class ExecutionStateManager:
                 data = json.loads(exec_file.read_text(encoding="utf-8"))
                 for task_id, record_data in data.items():
                     # Convert to TaskExecutionRecord
-                    self._execution_records[task_id] = TaskExecutionRecord(**record_data)
+                    record = msgspec.convert(record_data, type=TaskExecutionRecord)
+                    # msgspec may leave str-backed enum fields as plain strings.
+                    # Restore enum instances because orchestration code uses .value.
+                    record.status = TaskExecutionStatus(record.status)
+                    for subtask in record.subtask_records:
+                        subtask.status = SubtaskExecutionStatus(subtask.status)
+                    self._execution_records[task_id] = record
             
             # Load subtask records
             subtask_dir = self.data_dir / "subtasks"
@@ -69,17 +76,25 @@ class ExecutionStateManager:
                 for task_file in subtask_dir.glob("*.json"):
                     task_id = task_file.stem
                     data = json.loads(task_file.read_text(encoding="utf-8"))
-                    self._subtask_records[task_id] = {
-                        sid: SubtaskExecutionRecord(**sdata)
+                    loaded_subtasks = {
+                        sid: msgspec.convert(sdata, type=SubtaskExecutionRecord)
                         for sid, sdata in data.items()
                     }
+                    for subtask in loaded_subtasks.values():
+                        subtask.status = SubtaskExecutionStatus(subtask.status)
+                    self._subtask_records[task_id] = loaded_subtasks
             
             # Load checkpoints
             checkpoint_dir = self.data_dir / "checkpoints"
             if checkpoint_dir.exists():
                 for cp_file in checkpoint_dir.glob("*.json"):
                     data = json.loads(cp_file.read_text(encoding="utf-8"))
-                    checkpoint = Checkpoint(**data)
+                    checkpoint = Checkpoint(
+                        **{
+                            **data,
+                            "checkpoint_type": CheckpointType(data["checkpoint_type"]),
+                        }
+                    )
                     self._checkpoints[checkpoint.checkpoint_id] = checkpoint
                     
                     if checkpoint.task_id not in self._task_checkpoints:
@@ -89,7 +104,8 @@ class ExecutionStateManager:
             logger.info(f"Loaded state: {len(self._execution_records)} executions, {len(self._checkpoints)} checkpoints")
             
         except Exception as e:
-            logger.warning(f"Failed to load state: {e}")
+            logger.error(f"Failed to load persisted orchestration state: {e}")
+            raise
     
     async def save_execution_state(self, context: OrchestrationContext) -> None:
         """Save execution state to disk."""
@@ -149,10 +165,13 @@ class ExecutionStateManager:
                 for sid, record in records.items()
             }
             
-            task_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temp_file = task_file.with_suffix(task_file.suffix + ".tmp")
+            temp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            temp_file.replace(task_file)
             
         except Exception as e:
             logger.error(f"Failed to persist subtask records: {e}")
+            raise
     
     async def save_checkpoint(self, checkpoint: Checkpoint) -> None:
         """Save a checkpoint."""
@@ -172,13 +191,16 @@ class ExecutionStateManager:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
             
             cp_file = checkpoint_dir / f"{checkpoint.checkpoint_id}.json"
-            cp_file.write_text(
+            temp_file = cp_file.with_suffix(cp_file.suffix + ".tmp")
+            temp_file.write_text(
                 json.dumps(self._checkpoint_to_dict(checkpoint), indent=2),
                 encoding="utf-8"
             )
+            temp_file.replace(cp_file)
             
         except Exception as e:
             logger.error(f"Failed to persist checkpoint: {e}")
+            raise
     
     async def get_execution_record(self, task_id: str) -> Optional[TaskExecutionRecord]:
         """Get execution record by task ID."""

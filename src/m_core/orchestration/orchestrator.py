@@ -70,12 +70,13 @@ class ExecutionOrchestrator:
             return
         
         from .scheduler import TaskScheduler
-        from .state_manager import ExecutionStateManager
+        from .state_manager import state_manager as shared_state_manager
         from .recovery import FailureRecoveryManager
         from .evaluator import ResultEvaluator
         
         self._scheduler = self._scheduler or TaskScheduler()
-        self._state_manager = self._state_manager or ExecutionStateManager()
+        # Share the same manager instance used by task-board API routes.
+        self._state_manager = self._state_manager or shared_state_manager
         self._recovery_manager = self._recovery_manager or FailureRecoveryManager()
         self._evaluator = self._evaluator or ResultEvaluator()
         

@@ -490,32 +490,45 @@ async def test_persistence():
     
     # 2. Verify task persisted
     print("\n2. Verifying task persistence...")
-    records = await state_manager.list_executions(limit=10)
+    records = await state_manager.list_executions(limit=10000)
     found = any(r.task_id == task_id for r in records)
     print(f"   Task found in list: {found}")
+    if not found:
+        print("   FAIL: orchestrator task is not visible to the shared task state manager")
+        return False
     
     # 3. Verify subtasks persisted
     print("\n3. Verifying subtask persistence...")
-    record = await state_manager.get_execution_record(task_id)
-    if record and record.subtask_records:
-        print(f"   Subtasks persisted: {len(record.subtask_records)}")
-        for sr in record.subtask_records:
-            print(f"  - {sr.subtask_id}: {sr.status.value}")
+    persisted_subtasks = await state_manager.get_subtask_records(task_id)
+    print(f"   Subtasks persisted: {len(persisted_subtasks)}")
+    if not persisted_subtasks:
+        print("   FAIL: no subtask records were persisted")
+        return False
     
     # 4. Verify checkpoints persisted
     print("\n4. Verifying checkpoint persistence...")
     checkpoints = await state_manager.get_task_checkpoints(task_id)
     print(f"   Checkpoints: {len(checkpoints)}")
+    if not checkpoints:
+        print("   FAIL: no checkpoints were persisted")
+        return False
     for cp in checkpoints:
         print(f"  - {cp.checkpoint_id}: {cp.checkpoint_type.value}")
     
-    # 5. Test recovery simulation (restart scenario)
-    print("\n5. Testing recovery from checkpoint...")
-    if checkpoints:
-        latest = checkpoints[-1]
-        print(f"   Latest checkpoint: {latest.checkpoint_id} ({latest.checkpoint_type.value})")
-        # Note: Full recovery test would require restart
-        print("   (Full restart recovery test requires process restart)")
+    # 5. Verify state survives manager restart/reload
+    print("\n5. Testing recovery from persisted state...")
+    from m_core.orchestration.state_manager import ExecutionStateManager
+    reloaded_manager = ExecutionStateManager(data_dir=state_manager.data_dir)
+    await reloaded_manager.initialize()
+    reloaded_record = await reloaded_manager.get_execution_record(task_id)
+    reloaded_subtasks = await reloaded_manager.get_subtask_records(task_id)
+    reloaded_checkpoints = await reloaded_manager.get_task_checkpoints(task_id)
+    if not reloaded_record or not reloaded_subtasks or not reloaded_checkpoints:
+        print("   FAIL: task, subtasks, or checkpoints did not survive state reload")
+        return False
+    print(f"   Reloaded task: {reloaded_record.task_id} ({reloaded_record.status.value})")
+    print(f"   Reloaded subtasks: {len(reloaded_subtasks)}")
+    print(f"   Reloaded checkpoints: {len(reloaded_checkpoints)}")
     
     # 6. Verify no duplicate execution
     print("\n6. Verifying no duplicate execution...")
