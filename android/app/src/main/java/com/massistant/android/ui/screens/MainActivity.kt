@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             try {
+                chatRepository.initialize()
                 val autoConnect = settingsPreferences.autoConnect
                     .subscribeOn(Schedulers.io())
                     .observeOn(AndroidSchedulers.mainThread())
