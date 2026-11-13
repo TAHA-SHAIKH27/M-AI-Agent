@@ -274,12 +274,19 @@ class ExecutionOrchestrator:
             await self._create_checkpoint(orch_context, CheckpointType.POST_EXECUTION)
             
             # Publish completion event
+            terminal_event = (
+                "task.cancelled"
+                if execution_record.status == TaskExecutionStatus.CANCELLED
+                else "task.completed"
+                if evaluation.overall_result == EvaluationResult.SUCCESS
+                else "task.failed"
+            )
             await event_bus.publish_sync(
-                "task.completed" if evaluation.overall_result == EvaluationResult.SUCCESS else "task.failed",
+                terminal_event,
                 "orchestrator",
                 {
                     "task_id": task_id,
-                    "result": evaluation.overall_result.value,
+                    "result": execution_record.status.value,
                     "execution_time_ms": evaluation.execution_time_ms,
                 },
                 correlation_id=correlation_id
