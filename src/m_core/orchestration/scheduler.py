@@ -219,6 +219,9 @@ class TaskScheduler:
             
             for scheduled, result in zip(tasks, level_results):
                 if isinstance(result, Exception):
+                    scheduled.record.status = SubtaskExecutionStatus.FAILED
+                    scheduled.record.error = str(result)
+                    scheduled.record.completed_at = int(datetime.now().timestamp() * 1000)
                     result = {"success": False, "error": str(result)}
                 results[scheduled.subtask.id] = result
                 completed_tasks[scheduled.subtask.id] = result
@@ -267,6 +270,10 @@ class TaskScheduler:
                     results[tid] = result
                     completed_tasks[tid] = result
                 except Exception as e:
+                    scheduled = scheduled_tasks[tid]
+                    scheduled.record.status = SubtaskExecutionStatus.FAILED
+                    scheduled.record.error = str(e)
+                    scheduled.record.completed_at = int(datetime.now().timestamp() * 1000)
                     results[tid] = {"success": False, "error": str(e)}
                     completed_tasks[tid] = {"success": False, "error": str(e)}
                 
