@@ -17,7 +17,7 @@ class WebSocketClient(
     private val apiKey: String? = null,
     private val json: Json = Json { 
         ignoreUnknownKeys = true
-        useArrayPolymorphism = true
+        useArrayPolymorphism = false
         classDiscriminator = "type"
     }
 ) {
@@ -131,18 +131,17 @@ class WebSocketClient(
 
     fun sendApproval(taskId: String, subtaskId: String, approved: Boolean, reason: String? = null) {
         // Server expects WSMessage.ApprovalResponse or similar - send as raw JSON for now
-        val jsonString = json.encodeToString(
-            mapOf(
-                "type" to "approval_response",
-                "payload" to mapOf(
-                    "task_id" to taskId,
-                    "subtask_id" to subtaskId,
-                    "approved" to approved,
-                    "reason" to reason
-                )
-            )
-        )
-        webSocket?.send(jsonString)
+        val payload = kotlinx.serialization.json.buildJsonObject {
+            put("type", "approval_response")
+            putJsonObject("payload") {
+                put("task_id", taskId)
+                put("subtask_id", subtaskId)
+                put("approved", approved)
+                if (reason == null) put("reason", kotlinx.serialization.json.JsonNull)
+                else put("reason", reason)
+            }
+        }
+        webSocket?.send(payload.toString())
     }
 
     fun sendPing() {
