@@ -104,3 +104,43 @@ async def test_scheduler_waits_at_subtask_boundary_while_paused(monkeypatch):
     pause_event.set()
     await execution
     assert started.is_set()
+
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_wakes_pause_and_approval_gates():
+    await orchestrator.initialize()
+    task_id = "cancel-gate-regression"
+    record = TaskExecutionRecord(
+        task_id=task_id,
+        execution_plan_id="cancel-gate-plan",
+        status=TaskExecutionStatus.RUNNING,
+    )
+    plan = ExecutionPlan(
+        task_id="cancel-gate-plan",
+        original_request="cancel test",
+        analysis=TaskAnalysis(intent=TaskIntent(primary="cancel test")),
+    )
+    pause_gate = asyncio.Event()
+    approval_gate = asyncio.Event()
+    pause_gate.clear()
+    context = OrchestrationContext(
+        task_id=task_id,
+        execution_plan=plan,
+        routing_plan=RoutingPlan(execution_plan_id=plan.task_id),
+        task_context=TaskContext(task_id=task_id),
+        execution_record=record,
+        subtask_records={},
+        checkpoints=[],
+        pause_event=pause_gate,
+        approval_event=approval_gate,
+    )
+    orchestrator._active_tasks[task_id] = context
+    try:
+        assert await orchestrator.cancel_task(task_id) is True
+        assert context.cancelled is True
+        assert record.status is TaskExecutionStatus.CANCELLED
+        assert pause_gate.is_set() is True
+        assert approval_gate.is_set() is True
+    finally:
+        orchestrator._active_tasks.pop(task_id, None)
