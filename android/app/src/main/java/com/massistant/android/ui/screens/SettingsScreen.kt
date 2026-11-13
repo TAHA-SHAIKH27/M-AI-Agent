@@ -9,17 +9,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.massistant.android.data.preferences.SettingsPreferences
-import com.massistant.android.ui.theme.MTheme
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import io.reactivex.rxjava3.core.Completable
-import io.reactivex.rxjava3.core.Single
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.schedulers.Schedulers
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     settingsPreferences: SettingsPreferences,
@@ -41,41 +39,41 @@ fun SettingsScreen(
             settingsPreferences.serverUrl
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { serverUrl = it }
+                .subscribe({ value: String -> serverUrl = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.apiKey
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { apiKey = it ?: "" }
+                .subscribe({ value: String? -> apiKey = value ?: "" }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.autoConnect
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { autoConnect = it }
+                .subscribe({ value: Boolean -> autoConnect = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.voiceEnabled
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { voiceEnabled = it }
+                .subscribe({ value: Boolean -> voiceEnabled = value }, { error: Throwable -> errorMessage = error.message })
         )
         
         disposables.add(
             settingsPreferences.notificationsEnabled
                 .subscribeOn(Schedulers.io())
                 .observeOn(AndroidSchedulers.mainThread())
-                .subscribe { notificationsEnabled = it }
+                .subscribe({ value: Boolean -> notificationsEnabled = value }, { error: Throwable -> errorMessage = error.message })
         )
     }
 
     val scope = rememberCoroutineScope()
     
-    val saveSettings = {
+    val saveSettings: () -> Unit = {
         isLoading = true
         errorMessage = null
         successMessage = null
@@ -155,7 +153,7 @@ fun SettingsScreen(
                         placeholder = { Text("Enter API key if required") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        visualTransformation = androidx.compose.foundation.text.PasswordVisualTransformation()
+                        visualTransformation = PasswordVisualTransformation()
                     )
                 }
             }
