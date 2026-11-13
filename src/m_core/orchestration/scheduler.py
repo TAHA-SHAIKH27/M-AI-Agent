@@ -80,6 +80,7 @@ class TaskScheduler:
         correlation_id: str,
         progress_callback: Optional[Callable[[str, SubtaskExecutionRecord], Awaitable[None]]] = None,
         cancellation_check: Optional[Callable[[], bool]] = None,
+        pause_event: Optional[asyncio.Event] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Execute a plan with dependency-aware scheduling."""
         
@@ -111,17 +112,17 @@ class TaskScheduler:
         if execution_plan.strategy == ExecutionStrategy.SEQUENTIAL:
             return await self._execute_sequential(
                 scheduled_tasks, execution_plan, task_context, correlation_id,
-                progress_callback, cancellation_check
+                progress_callback, cancellation_check, pause_event
             )
         elif execution_plan.strategy == ExecutionStrategy.PARALLEL:
             return await self._execute_parallel(
                 scheduled_tasks, execution_plan, task_context, correlation_id,
-                progress_callback, cancellation_check
+                progress_callback, cancellation_check, pause_event
             )
         else:  # DEPENDENCY_AWARE
             return await self._execute_dependency_aware(
                 scheduled_tasks, execution_plan, task_context, correlation_id,
-                progress_callback, cancellation_check
+                progress_callback, cancellation_check, pause_event
             )
     
     async def _execute_sequential(
@@ -132,6 +133,7 @@ class TaskScheduler:
         correlation_id: str,
         progress_callback: Optional[Callable],
         cancellation_check: Optional[Callable],
+        pause_event: Optional[asyncio.Event] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Execute subtasks sequentially."""
         results = {}
@@ -145,6 +147,8 @@ class TaskScheduler:
         for scheduled in sorted_tasks:
             if cancellation_check and cancellation_check():
                 break
+            if pause_event:
+                await pause_event.wait()
             
             result = await self._execute_subtask(
                 scheduled, task_context, correlation_id, progress_callback
@@ -164,6 +168,7 @@ class TaskScheduler:
         correlation_id: str,
         progress_callback: Optional[Callable],
         cancellation_check: Optional[Callable],
+        pause_event: Optional[asyncio.Event] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Execute independent subtasks in parallel."""
         # Group by dependency level
@@ -173,6 +178,8 @@ class TaskScheduler:
         for level in levels:
             if cancellation_check and cancellation_check():
                 break
+            if pause_event:
+                await pause_event.wait()
             
             # Execute all tasks in this level in parallel
             tasks = [scheduled_tasks[tid] for tid in level]
@@ -206,6 +213,7 @@ class TaskScheduler:
         correlation_id: str,
         progress_callback: Optional[Callable],
         cancellation_check: Optional[Callable],
+        pause_event: Optional[asyncio.Event] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Execute subtasks respecting dependencies with max concurrency."""
         results = {}
@@ -219,6 +227,8 @@ class TaskScheduler:
                     task.cancel()
                 await asyncio.gather(*running.values(), return_exceptions=True)
                 break
+            if pause_event:
+                await pause_event.wait()
             
             # Check for completed running tasks
             done = []
