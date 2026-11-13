@@ -30,7 +30,7 @@ class SettingsPreferences @Inject constructor(
     }
 
     val serverUrl: Single<String> = dataStore.data
-        .map { it[SERVER_URL] ?: "http://192.168.1.100:8000" }
+        .map { it[SERVER_URL] ?: "http://192.168.1.100:8080" }
         .firstOrError()
 
     val apiKey: Single<String?> = dataStore.data
