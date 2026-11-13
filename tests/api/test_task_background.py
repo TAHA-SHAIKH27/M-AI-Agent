@@ -33,3 +33,11 @@ async def test_create_task_returns_queued_record_and_schedules_background_execut
     record = await state_manager.get_execution_record(response.task_id)
     assert record is not None
     assert record.status is TaskExecutionStatus.CANCELLED
+
+    # Even if the queued worker is invoked after cancellation, it must not plan
+    # or execute the task.
+    result = await orchestrator.execute_task(
+        user_request="Get system information",
+        task_id=response.task_id,
+    )
+    assert result.status is TaskExecutionStatus.CANCELLED
