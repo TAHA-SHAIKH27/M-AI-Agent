@@ -1,7 +1,6 @@
 package com.massistant.android.data.preferences
 
 import android.content.Context
-import androidx.datastore.preferences.rxjava2.RxDataStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
