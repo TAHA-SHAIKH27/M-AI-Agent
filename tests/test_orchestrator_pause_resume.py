@@ -7,6 +7,7 @@ from m_core.orchestration import orchestrator
 from m_core.orchestration.orchestrator import OrchestrationContext
 from m_core.orchestration.scheduler import ScheduledTask, TaskScheduler
 from m_core.orchestration.schemas import (
+    CheckpointType,
     SubtaskExecutionRecord,
     SubtaskExecutionStatus,
     TaskExecutionRecord,
@@ -52,10 +53,17 @@ async def test_orchestrator_pause_and_resume_updates_state_and_gate():
     )
     orchestrator._active_tasks[task_id] = context
     try:
+        checkpoint = await orchestrator._create_checkpoint(context, CheckpointType.MANUAL)
         assert await orchestrator.pause_task(task_id) is True
         assert record.status is TaskExecutionStatus.PAUSED
         assert gate.is_set() is False
 
+        resumed_record = await orchestrator.resume_from_checkpoint(checkpoint.checkpoint_id)
+        assert resumed_record is record
+        assert record.status is TaskExecutionStatus.RUNNING
+        assert gate.is_set() is True
+
+        assert await orchestrator.pause_task(task_id) is True
         assert await orchestrator.resume_task(task_id) is True
         assert record.status is TaskExecutionStatus.RUNNING
         assert gate.is_set() is True
