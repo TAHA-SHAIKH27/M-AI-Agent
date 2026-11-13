@@ -44,6 +44,16 @@ object ApiModule {
     }
 
     @Provides
+    @ServerUrl
+    fun provideServerUrl(settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences): String =
+        settingsPreferences.serverUrl.blockingGet().let { if (it.endsWith("/")) it else "$it/" }
+
+    @Provides
+    @ApiKey
+    fun provideApiKey(settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences): String? =
+        settingsPreferences.apiKey.blockingGet()
+
+    @Provides
     @Singleton
     fun provideRetrofit(
         okHttpClient: OkHttpClient,
