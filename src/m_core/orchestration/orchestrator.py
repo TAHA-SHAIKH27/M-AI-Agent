@@ -155,6 +155,7 @@ class ExecutionOrchestrator:
                     dependencies=subtask.dependencies,
                     max_retries=subtask.max_retries,
                 )
+            execution_record.subtask_records = list(subtask_records.values())
             
             # Check for approval requirements before execution
             approval_required = any(s.requires_approval and s.approval_status == ApprovalStatus.PENDING for s in execution_plan.subtasks)
@@ -348,6 +349,8 @@ class ExecutionOrchestrator:
                 record.result = result.get("result")
                 record.error = result.get("error")
                 record.completed_at = int(datetime.now().timestamp() * 1000)
+        
+        execution_record.subtask_records = list(context.subtask_records.values())
         
         # Create checkpoint after execution
         await self._create_checkpoint(context, CheckpointType.POST_EXECUTION)
