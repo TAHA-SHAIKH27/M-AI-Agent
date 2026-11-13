@@ -13,7 +13,6 @@ import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -28,9 +27,7 @@ class ChatRepository @Inject constructor(
     private val database: ConversationDatabase
 ) {
     private val _connectionState = MutableStateFlow<WebSocketClient.ConnectionState>(WebSocketClient.ConnectionState.Disconnected())
-    val connectionState = _connectionState
-        .asStateFlow()
-        .distinctUntilChanged()
+    val connectionState = _connectionState.asStateFlow()
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages = _messages.asStateFlow()
@@ -50,7 +47,7 @@ class ChatRepository @Inject constructor(
         }
     }
 
-    private fun loadMessages(conversationId: String) {
+    private suspend fun loadMessages(conversationId: String) {
         val messages = database.conversationDao().getMessages(conversationId)
             .map { it.toChatMessage() }
         _messages.value = messages
@@ -112,15 +109,16 @@ class ChatRepository @Inject constructor(
                     stream = false
                 ))
                 if (response.isSuccessful) {
-                    response.body()?.let { body ->
-                        if (body.conversation_id.isNotBlank()) {
-                            _currentConversationId.value = body.conversation_id
-                        }
+                    val body = response.body()
+                    if (body != null) {
+                        if (body.conversation_id.isNotBlank()) _currentConversationId.value = body.conversation_id
                         saveMessage(message, "user")
                         saveMessage(body.content, "assistant")
                         updateConversation(body.conversation_id, message)
+                        Result.success(body)
+                    } else {
+                        Result.failure(Exception("Empty response body"))
                     }
-                    Result.success(body!!)
                 } else {
                     Result.failure(Exception("HTTP ${response.code()}"))
                 }
@@ -166,9 +164,10 @@ class ChatRepository @Inject constructor(
     private fun loadConversationHistory() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val response = apiService.getConversations(20, 0).await()
+                val response = apiService.getConversations(20, 0)
                 if (response.isSuccessful) {
-                    response.body()?.conversations?.forEach { conv ->
+                    response.body()?.conversations?.let { conversations ->
+                    for (conv in conversations) {
                         val entity = ConversationEntity(
                             id = conv.id,
                             title = conv.title,
@@ -178,6 +177,7 @@ class ChatRepository @Inject constructor(
                             createdAt = conv.updated_at // approximate
                         )
                         database.conversationDao().insertConversation(entity)
+                    }
                     }
                 }
             } catch (e: Exception) {
@@ -258,7 +258,7 @@ class ChatRepository @Inject constructor(
 
     suspend fun voiceTranscribe(audioFile: String): Result<VoiceTranscribeResponse> {
         return try {
-            val response = apiService.voiceTranscribe(VoiceTranscribeRequest(audio_file = audioFile)).await()
+            val response = apiService.voiceTranscribe(VoiceTranscribeRequest(audio_file = audioFile))
             if (response.isSuccessful) Result.success(response.body()!!)
             else Result.failure(Exception("HTTP ${response.code()}"))
         } catch (e: Exception) {
