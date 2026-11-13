@@ -282,7 +282,7 @@ async def test_visual_automation():
     tool = tool_registry.get_tool("visual_find")
     context = ToolExecutionContext(
         tool_name="visual_find",
-        arguments={"method": "text", "search_text": "Windows", "threshold": 0.5},
+        arguments={"method": "text", "search_text": "Phase", "threshold": 0.5},
         correlation_id="accept-v3",
         user_id="test-user",
         permissions_granted=["screen:find"],
@@ -306,7 +306,7 @@ async def test_visual_automation():
     tool = tool_registry.get_tool("visual_verify")
     context = ToolExecutionContext(
         tool_name="visual_verify",
-        arguments={"check_type": "text_present", "search_text": "Windows", "threshold": 0.5},
+        arguments={"check_type": "text_present", "search_text": "Phase", "threshold": 0.5},
         correlation_id="accept-v4",
         user_id="test-user",
         permissions_granted=["screen:verify"],
