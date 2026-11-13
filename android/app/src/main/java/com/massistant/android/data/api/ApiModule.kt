@@ -48,8 +48,8 @@ object ApiModule {
 
     @Provides
     @ApiKey
-    fun provideApiKey(settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences): String? =
-        settingsPreferences.apiKey.blockingGet()
+    fun provideApiKey(settingsPreferences: com.massistant.android.data.preferences.SettingsPreferences): String =
+        settingsPreferences.apiKey.blockingGet().orEmpty()
 
     @Provides
     @Singleton
@@ -76,11 +76,11 @@ object ApiModule {
     fun provideWebSocketClient(
         okHttpClient: OkHttpClient,
         @ServerUrl baseUrl: String,
-        @ApiKey apiKey: String?
+        @ApiKey apiKey: String
     ): WebSocketClient {
         // Convert HTTP URL to WebSocket URL
         val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://")
-        return WebSocketClient(wsUrl, apiKey)
+        return WebSocketClient(wsUrl, apiKey.takeIf { it.isNotBlank() })
     }
 }
 
