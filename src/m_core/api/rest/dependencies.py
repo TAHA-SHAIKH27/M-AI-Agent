@@ -1,5 +1,6 @@
 """FastAPI dependencies for REST API."""
 from typing import Optional
+import ipaddress
 from fastapi import Depends, HTTPException, Header, Request
 from pydantic import BaseModel
 
@@ -31,23 +32,24 @@ async def validate_localhost(request: Request) -> None:
     """Validate request comes from localhost (for non-debug mode)."""
     if not settings.debug:
         client_host = request.client.host if request.client else "unknown"
-        allowed = ["127.0.0.1", "localhost", "::1"]
-        
-        # Allow private network ranges
-        if client_host.startswith("10.") or client_host.startswith("192.168."):
+        # Accept loopback and RFC1918 IPv4 addresses only. Prefix checks such
+        # as startswith("172.") accidentally admit public 172.x.x.x addresses.
+        try:
+            address = ipaddress.ip_address(client_host.split("%", 1)[0])
+        except ValueError:
+            address = None
+        private_networks = (
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("172.16.0.0/12"),
+            ipaddress.ip_network("192.168.0.0/16"),
+        )
+        if address is not None and (
+            address.is_loopback
+            or any(address.version == network.version and address in network for network in private_networks)
+        ):
             return
-        if client_host.startswith("172."):
-            parts = client_host.split(".")
-            if len(parts) >= 2 and parts[0] == "172":
-                try:
-                    second = int(parts[1])
-                    if 16 <= second <= 31:
-                        return
-                except ValueError:
-                    pass
-            return
         
-        if client_host not in allowed:
+        if client_host not in ("127.0.0.1", "localhost", "::1"):
             raise HTTPException(
                 status_code=403,
                 detail="Access denied: API only accessible from localhost",
