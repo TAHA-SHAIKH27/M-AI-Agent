@@ -261,12 +261,11 @@ async def get_task(
 )
 async def get_task_events(
     task_id: str,
+    after_event_id: Optional[str] = Query(None, description="Return events after this event ID"),
     client: APIClientInfo = Depends(get_client_info),
     _: None = Depends(validate_localhost),
 ) -> TaskEventStream:
-    """Get the event stream for a task."""
-    # This would require event persistence - for now return empty
-    # In a full implementation, events would be persisted alongside task state
+    """Replay recent in-memory events for a task after reconnecting."""
     try:
         record = await state_manager.get_execution_record(task_id)
         if not record:
@@ -274,13 +273,49 @@ async def get_task_events(
                 status_code=404,
                 detail={"error": f"Task '{task_id}' not found", "error_code": "TASK_NOT_FOUND"},
             )
-        
+
+        task_events = [
+            event for event in event_bus.get_history(limit=1000)
+            if event.payload.get("task_id") == task_id
+        ]
+        if after_event_id:
+            cursor_index = next(
+                (index for index, event in enumerate(task_events) if event.event_id == after_event_id),
+                None,
+            )
+            if cursor_index is not None:
+                task_events = task_events[cursor_index + 1:]
+
+        serialized_events = []
+        for event in task_events:
+            priority = (
+                "urgent" if event.type == "task.awaiting_approval"
+                else "attention" if event.type in {"task.failed", "task.step_failed", "task.verification_failed"}
+                else "normal"
+            )
+            serialized_events.append(TaskEvent(
+                event_id=event.event_id,
+                task_id=task_id,
+                event_type=event.type,
+                timestamp=int(event.timestamp.timestamp() * 1000),
+                priority=priority,
+                step_id=event.payload.get("subtask_id") or event.payload.get("step_id"),
+                status=event.payload.get("status"),
+                progress={
+                    key: event.payload[key]
+                    for key in ("completed", "total")
+                    if key in event.payload
+                } or None,
+                message=event.payload.get("message") or event.type,
+                metadata=event.payload,
+            ))
+
         return TaskEventStream(
             task_id=task_id,
-            events=[],  # Would be populated from event store
-            latest_event_id=None,
+            events=serialized_events,
+            latest_event_id=serialized_events[-1].event_id if serialized_events else None,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
