@@ -350,6 +350,7 @@ class ExecutionOrchestrator:
             active_context = self._active_tasks.get(task_id)
             if not active_context or active_context.execution_record.status != TaskExecutionStatus.AWAITING_APPROVAL:
                 self._active_tasks.pop(task_id, None)
+            self._cancelled_task_ids.discard(task_id)
     
     async def _execute_plan(
         self,
