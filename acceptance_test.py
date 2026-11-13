@@ -15,7 +15,8 @@ from m_core.orchestration.schemas import TaskExecutionStatus, SubtaskExecutionSt
 from m_core.tools import tool_registry
 from m_core.tools.schemas import ToolExecutionContext
 from m_core.security import consent_manager, ConsentScope
-from m_core.api.rest.routes.tasks import router as tasks_router
+from m_core.api.rest.routes.tasks import router as tasks_router, get_task_events
+from m_core.api.rest.dependencies import APIClientInfo
 from m_core.core.events import event_bus
 
 async def test_application_automation():
@@ -616,45 +617,36 @@ async def test_realtime_communication():
     # - task.verification
     # - task.completed or task.failed
     
-    print("\n2. Verifying event structure...")
-    record = await state_manager.get_execution_record(task_id)
-    if record:
-        print(f"   Task: {task_id}")
-        print(f"   Final status: {record.status.value}")
-        print(f"   Subtasks executed: {len(record.subtask_records)}")
-        for sr in record.subtask_records:
-            print(f"  - {sr.subtask_id}: {sr.status.value} (target: {sr.assigned_target_type}:{sr.assigned_target_id})")
-    
-    # 2. Verify WebSocket event payloads are properly structured
-    print("\n3. Verifying event payload structure...")
-    # Events are defined in schemas.py with proper payloads
-    # Key events verified:
-    print("   PASS task.created - TaskCreatedPayload")
-    print("   PASS task.started - TaskStartedPayload") 
-    print("   PASS task.progress - TaskProgressPayload")
-    print("   PASS task.step_started - TaskStepStartedPayload")
-    print("   PASS task.step_completed - TaskStepCompletedPayload")
-    print("   PASS task.step_failed - TaskStepFailedPayload")
-    print("   PASS task.verification - TaskVerificationPayload")
-    print("   PASS task.retry - TaskRetryPayload")
-    print("   PASS task.replanning - TaskReplanningPayload")
-    print("   PASS task.awaiting_approval - TaskApprovalRequiredPayload")
-    print("   PASS task.approved - TaskApprovedPayload")
-    print("   PASS task.denied - TaskDeniedPayload")
-    print("   PASS task.paused - TaskPausedPayload")
-    print("   PASS task.resumed - TaskResumedPayload")
-    print("   PASS task.cancelled - TaskCancelledPayload")
-    print("   PASS task.completed - TaskCompletedPayload")
-    print("   PASS task.failed - TaskFailedPayload")
-    print("   PASS task.verification_failed - TaskVerificationFailedPayload")
-    print("   PASS task.recovery - TaskRecoveryPayload")
-    
-    # 3. Reconnection support (event persistence)
-    print("\n4. Reconnection support...")
-    print("   Events are published to event_bus (in-memory)")
-    print("   For production: events should be persisted to DB for replay")
-    print("   Current: event history available via event_bus.history")
-    
+    print("\n2. Verifying events actually emitted...")
+    events = [
+        event for event in event_bus.get_history(limit=1000)
+        if event.payload.get("task_id") == task_id
+    ]
+    event_types = {event.type for event in events}
+    required_events = {"task.created", "task.started", "task.progress"}
+    if not required_events.issubset(event_types):
+        print(f"   FAIL: Missing emitted events: {sorted(required_events - event_types)}")
+        return False
+    if not ({"task.completed", "task.failed"} & event_types):
+        print("   FAIL: No terminal task event was emitted")
+        return False
+
+    print("\n3. Verifying reconnect replay endpoint...")
+    replay = await get_task_events(
+        task_id,
+        after_event_id=None,
+        client=APIClientInfo(host="127.0.0.1"),
+        _=None,
+    )
+    replay_types = {event.event_type for event in replay.events}
+    if not required_events.issubset(replay_types):
+        print(f"   FAIL: Reconnect replay is missing events: {sorted(required_events - replay_types)}")
+        return False
+    if replay.latest_event_id != replay.events[-1].event_id:
+        print("   FAIL: Latest event cursor is incorrect")
+        return False
+    print(f"   Replayed {len(replay.events)} events; latest cursor: {replay.latest_event_id}")
+
     print("\nTEST 7: Real-time Communication - PASS")
     return True
 
