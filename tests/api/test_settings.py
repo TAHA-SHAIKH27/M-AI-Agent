@@ -1,5 +1,6 @@
 """Tests for settings endpoints."""
 import pytest
+from httpx import AsyncClient
 from m_core.model_providers import provider_factory
 
 
