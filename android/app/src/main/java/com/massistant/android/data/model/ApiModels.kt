@@ -1,54 +1,8 @@
 package com.massistant.android.data.model
 
-import kotlinx.serialization.Contextual
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.descriptors.PolymorphicKind
-import kotlinx.serialization.descriptors.SerialDescriptor
-import kotlinx.serialization.descriptors.SerialKind
-import kotlinx.serialization.encoding.Decoder
-import kotlinx.serialization.encoding.Encoder
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonConfiguration
-import kotlinx.serialization.modules.SerializersModule
-import kotlinx.serialization.modules.contextual
-
-// Serializers module for handling Any types
-object CustomSerializers {
-    val module = SerializersModule {
-        contextual(Map<String, Any>::class, AnyMapSerializer)
-        contextual(Map<String, Any?>::class, AnyNullableMapSerializer)
-    }
-}
-
-object AnyMapSerializer : kotlinx.serialization.KSerializer<Map<String, Any>> {
-    override val descriptor: SerialDescriptor = kotlinx.serialization.descriptors.buildMapSerializer(
-        kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("String", SerialKind.STRING),
-        kotlinx.serialization.descriptors.AnySerializer
-    ).descriptor
-
-    override fun serialize(encoder: Encoder, value: Map<String, Any>) {
-        encoder.encodeSerializableValue(value)
-    }
-
-    override fun deserialize(decoder: Decoder): Map<String, Any> {
-        return decoder.decodeSerializableValue()
-    }
-}
-
-object AnyNullableMapSerializer : kotlinx.serialization.KSerializer<Map<String, Any?>> {
-    override val descriptor: SerialDescriptor = kotlinx.serialization.descriptors.buildMapSerializer(
-        kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("String", SerialKind.STRING),
-        kotlinx.serialization.descriptors.AnySerializer
-    ).descriptor
-
-    override fun serialize(encoder: Encoder, value: Map<String, Any?>) {
-        encoder.encodeSerializableValue(value)
-    }
-
-    override fun deserialize(decoder: Decoder): Map<String, Any?> {
-        return decoder.decodeSerializableValue()
-    }
-}
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.json.JsonElement
 
 // Chat Models
 @Serializable
@@ -76,7 +30,6 @@ data class ChatMessage(
 
 // WebSocket Models
 @Serializable
-@PolymorphicSerializer(using = WSMessageSerializer::class)
 sealed class WSMessage {
     @Serializable
     @SerialName("chat")
@@ -124,89 +77,6 @@ sealed class WSMessage {
     ) : WSMessage()
 }
 
-// Custom serializer for WSMessage sealed class
-object WSMessageSerializer : kotlinx.serialization.KSerializer<WSMessage> {
-    override val descriptor: SerialDescriptor = kotlinx.serialization.descriptors.buildClassSerialDescriptor("WSMessage") {
-        element("type", kotlinx.serialization.descriptors.PrimitiveSerialDescriptor("String", SerialKind.STRING))
-        element("payload", kotlinx.serialization.descriptors.AnySerializer)
-    }.build()
-
-    override fun serialize(encoder: Encoder, value: WSMessage) {
-        val output = encoder.beginStructure(descriptor)
-        when (value) {
-            is WSMessage.Chat -> {
-                output.encodeStringElement(descriptor, 0, "chat")
-                output.encodeSerializableElement(descriptor, 1, value.payload)
-            }
-            is WSMessage.TaskProgress -> {
-                output.encodeStringElement(descriptor, 0, "task_progress")
-                output.encodeSerializableElement(descriptor, 1, value.payload)
-            }
-            is WSMessage.TaskCompleted -> {
-                output.encodeStringElement(descriptor, 0, "task_completed")
-                output.encodeSerializableElement(descriptor, 1, value.payload)
-            }
-            is WSMessage.ApprovalRequired -> {
-                output.encodeStringElement(descriptor, 0, "approval_required")
-                output.encodeSerializableElement(descriptor, 1, value.payload)
-            }
-            is WSMessage.Error -> {
-                output.encodeStringElement(descriptor, 0, "error")
-                output.encodeSerializableElement(descriptor, 1, value.payload)
-            }
-            is WSMessage.Ping -> {
-                output.encodeStringElement(descriptor, 0, "ping")
-                output.encodeNullableSerializableElement(descriptor, 1, kotlinx.serialization.descriptors.AnySerializer, null)
-            }
-            is WSMessage.Pong -> {
-                output.encodeStringElement(descriptor, 0, "pong")
-                output.encodeNullableSerializableElement(descriptor, 1, kotlinx.serialization.descriptors.AnySerializer, null)
-            }
-            is WSMessage.Ack -> {
-                output.encodeStringElement(descriptor, 0, "ack")
-                output.encodeSerializableElement(descriptor, 1, value)
-            }
-        }
-        output.endStructure(descriptor)
-    }
-
-    override fun deserialize(decoder: Decoder): WSMessage {
-        val input = decoder.beginStructure(descriptor)
-        val type = input.decodeStringElement(descriptor, 0)
-        val result = when (type) {
-            "chat" -> {
-                val payload = input.decodeSerializableElement(descriptor, 1, ChatPayload.serializer())
-                WSMessage.Chat(payload)
-            }
-            "task_progress" -> {
-                val payload = input.decodeSerializableElement(descriptor, 1, TaskProgressPayload.serializer())
-                WSMessage.TaskProgress(payload)
-            }
-            "task_completed" -> {
-                val payload = input.decodeSerializableElement(descriptor, 1, TaskCompletedPayload.serializer())
-                WSMessage.TaskCompleted(payload)
-            }
-            "approval_required" -> {
-                val payload = input.decodeSerializableElement(descriptor, 1, ApprovalRequiredPayload.serializer())
-                WSMessage.ApprovalRequired(payload)
-            }
-            "error" -> {
-                val payload = input.decodeSerializableElement(descriptor, 1, ErrorPayload.serializer())
-                WSMessage.Error(payload)
-            }
-            "ping" -> WSMessage.Ping
-            "pong" -> WSMessage.Pong
-            "ack" -> {
-                val ack = input.decodeSerializableElement(descriptor, 1, WSMessage.Ack.serializer())
-                ack
-            }
-            else -> throw kotlinx.serialization.SerializationException("Unknown WSMessage type: $type")
-        }
-        input.endStructure(descriptor)
-        return result
-    }
-}
-
 @Serializable
 data class ChatPayload(
     val message: String,
@@ -237,8 +107,15 @@ data class ApprovalRequiredPayload(
     val subtask_id: String,
     val description: String,
     val risk_level: String,
-    @Contextual val tool_name: String? = null,
-    @Contextual val arguments: Map<String, Any>? = null
+    val tool_name: String? = null,
+    val arguments: Map<String, JsonElement>? = null
+)
+
+@Serializable
+data class ErrorPayload(
+    val message: String? = null,
+    val error: String? = null,
+    val error_code: String? = null
 )
 
 // Approval Models
@@ -271,8 +148,8 @@ data class ToolManifest(
     val description: String,
     val category: String,
     val risk_level: String,
-    @Contextual val input_schema: Map<String, Any>,
-    @Contextual val output_schema: Map<String, Any>,
+    val input_schema: Map<String, JsonElement>,
+    val output_schema: Map<String, JsonElement>,
     val required_permissions: List<String>,
     val optional_permissions: List<String>,
     val requires_approval: Boolean,
@@ -290,13 +167,13 @@ data class HealthResponse(
     val status: String,
     val version: String,
     val uptime_seconds: Float,
-    @Contextual val components: Map<String, ComponentHealth>
+    val components: Map<String, ComponentHealth>
 )
 
 @Serializable
 data class ComponentHealth(
     val status: String,
-    @Contextual val details: Map<String, Any>? = null
+    val details: Map<String, JsonElement>? = null
 )
 
 @Serializable
