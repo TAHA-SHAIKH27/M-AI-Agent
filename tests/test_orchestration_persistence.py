@@ -62,9 +62,9 @@ async def test_execution_subtasks_and_checkpoints_survive_reload(tmp_path):
     loaded_checkpoints = await reloaded.get_task_checkpoints("task-1")
 
     assert loaded_record is not None
-    assert loaded_record.status is TaskExecutionStatus.COMPLETED
+    assert loaded_record.status == TaskExecutionStatus.COMPLETED
     assert loaded_record.subtask_records[0].subtask_id == "subtask-1"
-    assert loaded_subtasks["subtask-1"].status is SubtaskExecutionStatus.COMPLETED
+    assert loaded_subtasks["subtask-1"].status == SubtaskExecutionStatus.COMPLETED
     assert len(loaded_checkpoints) == 1
-    assert loaded_checkpoints[0].checkpoint_type is CheckpointType.POST_EXECUTION
+    assert loaded_checkpoints[0].checkpoint_type == CheckpointType.POST_EXECUTION
 
