@@ -104,11 +104,12 @@ class ExecutionOrchestrator:
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        task_id: Optional[str] = None,
     ) -> TaskExecutionRecord:
         """Execute a complete user task from request to final result."""
         await self.initialize()
         
-        task_id = str(uuid.uuid4())[:8]
+        task_id = task_id or str(uuid.uuid4())[:8]
         correlation_id = str(uuid.uuid4())
         
         # Create task context
@@ -119,15 +120,26 @@ class ExecutionOrchestrator:
             session_data=context or {},
         )
         
-        # Create initial execution record early so it's available in error handlers
-        execution_record = TaskExecutionRecord(
-            task_id=task_id,
-            execution_plan_id="",  # Will be updated after planning
-            conversation_id=conversation_id,
-            user_id=user_id,
-            status=TaskExecutionStatus.PENDING,
-        )
-        
+        # Reuse the queued record created by the asynchronous task API when present.
+        execution_record = await self._state_manager.get_execution_record(task_id)
+        if execution_record is None:
+            execution_record = TaskExecutionRecord(
+                task_id=task_id,
+                execution_plan_id="",
+                conversation_id=conversation_id,
+                user_id=user_id,
+                status=TaskExecutionStatus.PENDING,
+            )
+        else:
+            execution_record.execution_plan_id = ""
+            execution_record.conversation_id = conversation_id
+            execution_record.user_id = user_id
+            if execution_record.status == TaskExecutionStatus.CANCELLED:
+                return execution_record
+            execution_record.status = TaskExecutionStatus.QUEUED
+            execution_record.error = None
+            execution_record.completed_at = None
+
         # Publish task created event
         await event_bus.publish_sync(
             "task.created",
@@ -532,6 +544,21 @@ class ExecutionOrchestrator:
             context.pause_event.set()
             context.approval_event.set()
             await self._state_manager.save_execution_state(context)
+            await event_bus.publish_sync(
+                "task.cancelled",
+                "orchestrator",
+                {"task_id": task_id, "status": TaskExecutionStatus.CANCELLED.value},
+            )
+            return True
+
+        # A task may still be queued before its background worker has created
+        # an orchestration context. Persist cancellation so the worker exits
+        # before planning or executing any actions.
+        record = await self._state_manager.get_execution_record(task_id)
+        if record and record.status in (TaskExecutionStatus.PENDING, TaskExecutionStatus.QUEUED):
+            record.status = TaskExecutionStatus.CANCELLED
+            record.completed_at = int(datetime.now().timestamp() * 1000)
+            await self._state_manager.save_execution_record(record)
             await event_bus.publish_sync(
                 "task.cancelled",
                 "orchestrator",
