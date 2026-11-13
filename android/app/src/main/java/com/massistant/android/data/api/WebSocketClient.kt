@@ -57,6 +57,7 @@ class WebSocketClient(
         val request = Request.Builder()
             .url("$serverUrl/api/v1/ws")
             .addHeader("User-Agent", "M-Android-Companion/1.0")
+            .apply { if (!apiKey.isNullOrBlank()) addHeader("Authorization", "Bearer $apiKey") }
             .build()
         
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
