@@ -72,6 +72,7 @@ dependencies {
     
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:$lifecycle_version")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:$lifecycle_version")
     implementation("androidx.activity:activity-compose:$activity_version")
     implementation("androidx.window:window:1.3.0")
 
