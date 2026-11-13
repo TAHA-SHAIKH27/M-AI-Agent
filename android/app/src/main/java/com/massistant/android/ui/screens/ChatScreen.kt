@@ -75,7 +75,7 @@ fun ChatScreen(
     }
 
     val handleApprove = {
-        approvalPayload.value?.let { payload ->
+        approvalPayload?.let { payload ->
             repository.sendApproval(payload.task_id, payload.subtask_id, true)
         }
         showApprovalDialog = false
@@ -86,8 +86,8 @@ fun ChatScreen(
         approvalPayload.value?.let { payload ->
             repository.sendApproval(payload.task_id, payload.subtask_id, false)
         }
-        showApprovalDialog.value = false
-        approvalPayload.value = null
+        showApprovalDialog = false
+        approvalPayload = null
     }
 
     Scaffold(
@@ -261,7 +261,7 @@ fun NavigationItem(
             .fillMaxWidth()
             .padding(vertical = 12.dp)
             .background(
-                if (selected) colors.primaryContainer else colors.transparent,
+                if (selected) colors.primaryContainer else androidx.compose.ui.graphics.Color.Transparent,
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
             )
             .clickable(onClick = onClick),
