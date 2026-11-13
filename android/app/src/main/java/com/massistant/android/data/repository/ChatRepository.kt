@@ -129,7 +129,7 @@ class ChatRepository(
     }
 
     private fun saveMessage(content: String, role: String) {
-        val conversationId = _currentConversationId.value ?: "conv_\${System.currentTimeMillis()}".also {
+        val conversationId = _currentConversationId.value ?: "conv_${System.currentTimeMillis()}".also {
             _currentConversationId.value = it
         }
         val message = ChatMessage(role = role, content = content)
