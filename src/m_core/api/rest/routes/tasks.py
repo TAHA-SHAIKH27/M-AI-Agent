@@ -81,6 +81,7 @@ async def list_tasks(
                 TaskExecutionStatus.QUEUED: "queued",
                 TaskExecutionStatus.RUNNING: "running",
                 TaskExecutionStatus.WAITING: "waiting",
+                TaskExecutionStatus.PAUSED: "paused",
                 TaskExecutionStatus.COMPLETED: "completed",
                 TaskExecutionStatus.FAILED: "failed",
                 TaskExecutionStatus.CANCELLED: "cancelled",
@@ -367,6 +368,72 @@ async def cancel_task(
                 "error_code": "TASK_CANCEL_FAILED",
                 "details": {"message": str(e)},
             },
+        )
+
+
+@router.post(
+    "/{task_id}/pause",
+    response_model=TaskInfo,
+    summary="Pause a task",
+    description="Pause a running task between subtask boundaries",
+)
+async def pause_task(
+    task_id: str,
+    client: APIClientInfo = Depends(get_client_info),
+    _: None = Depends(validate_localhost),
+) -> TaskInfo:
+    """Pause a running task."""
+    try:
+        success = await orchestrator.pause_task(task_id)
+        if not success:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": f"Task '{task_id}' is not currently pausable",
+                    "error_code": "TASK_NOT_PAUSABLE",
+                },
+            )
+        return await get_task(task_id, client)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("pause_task_failed", task_id=task_id, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to pause task", "error_code": "TASK_PAUSE_FAILED"},
+        )
+
+
+@router.post(
+    "/{task_id}/resume",
+    response_model=TaskInfo,
+    summary="Resume a paused task",
+    description="Resume a task previously paused by the user",
+)
+async def resume_task(
+    task_id: str,
+    client: APIClientInfo = Depends(get_client_info),
+    _: None = Depends(validate_localhost),
+) -> TaskInfo:
+    """Resume a paused task."""
+    try:
+        success = await orchestrator.resume_task(task_id)
+        if not success:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": f"Task '{task_id}' is not currently resumable",
+                    "error_code": "TASK_NOT_RESUMABLE",
+                },
+            )
+        return await get_task(task_id, client)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("resume_task_failed", task_id=task_id, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to resume task", "error_code": "TASK_RESUME_FAILED"},
         )
 
 
