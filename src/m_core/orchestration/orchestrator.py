@@ -293,11 +293,19 @@ class ExecutionOrchestrator:
             )
             
             # Log audit
+            task_succeeded = (
+                execution_record.status != TaskExecutionStatus.CANCELLED
+                and evaluation.overall_result == EvaluationResult.SUCCESS
+            )
             audit_logger.log(
-                event_type=AuditEventType.AGENT_COMPLETED if evaluation.overall_result == EvaluationResult.SUCCESS else AuditEventType.AGENT_FAILED,
+                event_type=AuditEventType.AGENT_COMPLETED if task_succeeded else AuditEventType.AGENT_FAILED,
                 resource=task_id,
                 action="execute_task",
-                result="success" if evaluation.overall_result == EvaluationResult.SUCCESS else "failure",
+                result=(
+                    "success" if task_succeeded
+                    else "cancelled" if execution_record.status == TaskExecutionStatus.CANCELLED
+                    else "failure"
+                ),
                 details={"evaluation": evaluation.overall_result.value},
                 correlation_id=correlation_id,
             )
