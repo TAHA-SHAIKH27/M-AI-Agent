@@ -44,9 +44,7 @@ fun ChatScreen(
     // Handle incoming WebSocket messages
     LaunchedEffect(repository) {
         repository.handleIncomingMessages(
-            onMessage = { msg ->
-                // Assistant message received via WebSocket
-            },
+            onMessage = { /* repository updates its StateFlow */ },
             onTaskProgress = { progress ->
                 // Update UI with task progress
             },
@@ -157,7 +155,7 @@ fun ChatScreen(
                     onVoiceClick = {
                         if (isVoiceRecording) stopVoiceRecording() else startVoiceRecording()
                     },
-                    enabled = connectionState is WebSocketClient.ConnectionState.Connected
+                    enabled = true
                 )
             }
 
