@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -27,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.massistant.android.ui.theme.warning
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageBubble(
     message: String,
@@ -235,7 +237,7 @@ fun ToolCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        Shield,
+                        Icons.Default.Shield,
                         contentDescription = null,
                         tint = colors.warning,
                         modifier = Modifier.size(16.dp)
