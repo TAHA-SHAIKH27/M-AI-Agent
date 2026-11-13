@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.toMutablePreferences
 import androidx.datastore.preferences.rxjava3.RxPreferenceDataStoreBuilder
 import androidx.datastore.rxjava3.data
 import androidx.datastore.rxjava3.updateData
@@ -53,28 +54,30 @@ class SettingsPreferences @Inject constructor(
         .firstOrError()
 
     fun updateServerUrl(url: String): Completable {
-        return dataStore.updateData { it[SERVER_URL] = url }.ignoreElement()
+        return dataStore.updateData { preferences -> preferences.toMutablePreferences().apply { this[SERVER_URL] = url } }.ignoreElement()
     }
 
     fun updateApiKey(key: String?): Completable {
         return dataStore.updateData { preferences ->
-            if (key == null) preferences.remove(API_KEY) else preferences[API_KEY] = key
+            preferences.toMutablePreferences().apply {
+                if (key == null) remove(API_KEY) else this[API_KEY] = key
+            }
         }.ignoreElement()
     }
 
     fun updateAutoConnect(enabled: Boolean): Completable {
-        return dataStore.updateData { it[AUTO_CONNECT] = enabled }.ignoreElement()
+        return dataStore.updateData { preferences -> preferences.toMutablePreferences().apply { this[AUTO_CONNECT] = enabled } }.ignoreElement()
     }
 
     fun updateVoiceEnabled(enabled: Boolean): Completable {
-        return dataStore.updateData { it[VOICE_ENABLED] = enabled }.ignoreElement()
+        return dataStore.updateData { preferences -> preferences.toMutablePreferences().apply { this[VOICE_ENABLED] = enabled } }.ignoreElement()
     }
 
     fun updateNotificationsEnabled(enabled: Boolean): Completable {
-        return dataStore.updateData { it[NOTIFICATIONS_ENABLED] = enabled }.ignoreElement()
+        return dataStore.updateData { preferences -> preferences.toMutablePreferences().apply { this[NOTIFICATIONS_ENABLED] = enabled } }.ignoreElement()
     }
 
     fun updateThemeMode(mode: Int): Completable {
-        return dataStore.updateData { it[THEME_MODE] = mode }.ignoreElement()
+        return dataStore.updateData { preferences -> preferences.toMutablePreferences().apply { this[THEME_MODE] = mode } }.ignoreElement()
     }
 }
