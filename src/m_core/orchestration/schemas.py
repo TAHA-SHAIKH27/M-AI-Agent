@@ -11,6 +11,7 @@ class TaskExecutionStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING = "waiting"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
