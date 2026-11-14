@@ -5,7 +5,7 @@ import structlog
 from typing import Dict, List, Optional, Type, Any, Callable
 from dataclasses import dataclass, field
 
-from .schemas import ToolManifest, ToolInvocation, ToolResult, ToolExecutionContext, ToolRiskLevel
+from m_core.common_schemas import ToolManifest, ToolInvocation, ToolResult, ToolExecutionContext, ToolRiskLevel
 from .base import BaseTool
 from ..core.registry import Registry
 from ..core.exceptions import ToolNotFoundError, ToolExecutionError
@@ -202,11 +202,15 @@ class ToolRegistry(Registry):
         approval_token: Optional[str] = None,
     ) -> Any:
         """Convenience method to invoke a tool."""
-        from .schemas import ToolInvocation
-        
+        from m_core.common_schemas import ToolInvocation
+
+        final_args = dict(arguments or {})
+        if approval_token and "approval_token" not in final_args:
+            final_args["approval_token"] = approval_token
+
         invocation = ToolInvocation(
             tool_name=tool_name,
-            arguments=arguments,
+            arguments=final_args,
             correlation_id=correlation_id,
             timeout_seconds=timeout_seconds,
         )

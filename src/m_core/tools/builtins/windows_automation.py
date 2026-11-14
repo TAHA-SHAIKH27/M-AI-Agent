@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 
-from ..schemas import ToolExecutionContext, ToolResult
+from m_core.common_schemas import ToolExecutionContext, ToolResult
 from ..base import BaseTool
 
 logger = structlog.get_logger(__name__)
@@ -81,7 +81,7 @@ class AppLaunchTool(BaseTool):
                 "working_directory": {"type": "string", "description": "Working directory for the process"},
                 "run_as_admin": {"type": "boolean", "default": False, "description": "Run as administrator"},
                 "wait": {"type": "boolean", "default": False, "description": "Wait for process to complete"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["app_name"],
             "additionalProperties": False,
@@ -107,10 +107,10 @@ class AppLaunchTool(BaseTool):
     }
     
     def _get_app_path(self, app_name: str) -> str:
-        """Resolve app name to executable path."""
-        # Common Windows apps
+        """Resolve app name to executable path or launch command."""
+        # Common Windows apps - UWP apps need special handling
         common_apps = {
-            "notepad": "notepad.exe",
+            "notepad": "uwp:Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
             "calc": "calc.exe",
             "calculator": "calc.exe",
             "explorer": "explorer.exe",
@@ -151,6 +151,50 @@ class AppLaunchTool(BaseTool):
         # Try to find in PATH
         return app_name + ".exe"
     
+    def _is_uwp_app(self, app_path: str) -> bool:
+        """Check if the app path is a UWP app identifier."""
+        return app_path.startswith("uwp:")
+    
+    def _launch_uwp_app(self, app_path: str) -> subprocess.Popen:
+        """Launch a UWP app using the AppsFolder protocol and wait for the actual process."""
+        # app_path comes as "uwp:Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+        # We need to strip the "uwp:" prefix
+        if app_path.startswith("uwp:"):
+            app_id = app_path[4:]
+        else:
+            app_id = app_path
+        
+        # Use cmd.exe to launch UWP app via AppsFolder protocol (more reliable than explorer.exe or powershell)
+        # Format: cmd.exe /c start "" shell:AppsFolder\<AppUserModelId>
+        cmd = ["cmd.exe", "/c", "start", "", f"shell:AppsFolder\\{app_id}"]
+        
+        # Launch cmd which will start the UWP app
+        proc = subprocess.Popen(cmd)
+        
+        # Wait for the actual UWP app process to start
+        import time
+        import psutil
+        
+        # For Notepad, the UWP process name is "Notepad.exe"
+        target_name = "Notepad.exe"
+        
+        # Wait for the process to appear (up to 10 seconds)
+        for _ in range(20):
+            time.sleep(0.5)
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    if proc.info['name'] == target_name:
+                        # Found the UWP process, return a mock process object with the correct PID
+                        class MockProcess:
+                            def __init__(self, pid):
+                                self.pid = pid
+                        return MockProcess(proc.info['pid'])
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        
+        # If we couldn't find the process, return the cmd process (fallback)
+        return proc
+    
     async def _execute_impl(self, context) -> dict:
         args = context.arguments
         app_name = args.get("app_name")
@@ -162,14 +206,28 @@ class AppLaunchTool(BaseTool):
         if not app_name:
             return {"success": False, "error": "app_name is required", "error_code": "INVALID_INPUT"}
         
-        # Validate approval
-        if not args.get("approved", False):
-            return {"success": False, "error": "Explicit approval required to launch applications", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         app_path = self._get_app_path(app_name)
         
         try:
-            # Prepare command
+            # Handle UWP apps (like Notepad on Windows 11)
+            if self._is_uwp_app(app_path):
+                proc = self._launch_uwp_app(app_path)
+                # For UWP apps launched via explorer, the PID might not be immediately available
+                # We return success and let the caller wait for the window
+                return {
+                    "success": True,
+                    "result": {
+                        "process_id": proc.pid if proc.pid > 0 else 0,
+                        "process_name": app_path,
+                        "started": True,
+                    },
+                    "error": None,
+                }
+            
+            # Prepare command for regular apps
             cmd = [app_path]
             if arguments:
                 if isinstance(arguments, str):
@@ -274,7 +332,7 @@ class AppControlTool(BaseTool):
                 "process_name": {"type": "string", "description": "Process name to match (e.g., 'notepad.exe')"},
                 "process_id": {"type": "integer", "description": "Process ID to target"},
                 "hwnd": {"type": "integer", "description": "Window handle (HWND)"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -376,10 +434,8 @@ class AppControlTool(BaseTool):
         if not WIN32_AVAILABLE:
             return {"success": False, "error": "Windows automation dependencies not available", "error_code": "DEPENDENCY_MISSING"}
         
-        # Validate approval for destructive actions
-        if action in ["close", "minimize", "maximize", "focus", "restore"]:
-            if not context.arguments.get("approved", False):
-                return {"success": False, "error": "Explicit approval required for window control", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         hwnd_target = self._find_window(
             title=window_title,
@@ -598,7 +654,6 @@ class PowerShellTool(BaseTool):
                 "execution_policy": {"type": "string", "default": "RemoteSigned", "enum": ["Restricted", "AllSigned", "RemoteSigned", "Unrestricted", "Bypass"], "description": "Execution policy"},
                 "timeout_seconds": {"type": "integer", "default": 60, "description": "Timeout in seconds"},
                 "run_as_admin": {"type": "boolean", "default": False, "description": "Run as administrator"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
                 "approval_token": {"type": "string", "description": "Approval token"},
             },
             "required": ["command"],
@@ -636,9 +691,8 @@ class PowerShellTool(BaseTool):
         if not command:
             return {"success": False, "error": "command is required", "error_code": "INVALID_INPUT"}
         
-        # Validate approval
-        if not args.get("approved", False):
-            return {"success": False, "error": "Explicit approval required for PowerShell execution", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         try:
             # Build PowerShell command
@@ -1059,7 +1113,7 @@ class SystemCommandTool(BaseTool):
                 "arguments": {"type": "string", "default": "", "description": "Arguments to pass"},
                 "timeout_seconds": {"type": "integer", "default": 30, "description": "Timeout in seconds"},
                 "run_as_admin": {"type": "boolean", "default": False, "description": "Run as administrator"},
-                "approved": {"type": "boolean", "default": False, "description": "Explicit approval flag"},
+                "approval_token": {"type": "string", "description": "Approval token for automated approval"},
             },
             "required": ["command"],
             "additionalProperties": False,
@@ -1094,8 +1148,8 @@ class SystemCommandTool(BaseTool):
         if not command:
             return {"success": False, "error": "command is required", "error_code": "INVALID_INPUT"}
         
-        if not args.get("approved", False):
-            return {"success": False, "error": "Explicit approval required for system commands", "error_code": "APPROVAL_REQUIRED"}
+        # Consent is checked by BaseTool.execute() before calling _execute_impl
+        # No internal approved flag check needed - consent system handles it
         
         try:
             cmd = f"cmd.exe /c {command}"

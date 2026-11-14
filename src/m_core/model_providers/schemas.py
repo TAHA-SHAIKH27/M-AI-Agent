@@ -5,6 +5,29 @@ from enum import Enum
 from dataclasses import dataclass
 
 
+# Common tool schemas (also available in m_core.common_schemas)
+class ToolRiskLevel(str, Enum):
+    """Risk level of a tool."""
+    LOW = "low"           # Read-only, no side effects
+    MEDIUM = "medium"     # May modify state, requires consent
+    HIGH = "high"         # Significant side effects, explicit approval required
+    CRITICAL = "critical" # System-level operations, explicit approval + confirmation
+
+
+class ToolCategory(str, Enum):
+    """Tool category for organization."""
+    SYSTEM = "system"
+    FILE = "file"
+    WEB = "web"
+    MEMORY = "memory"
+    APP = "app"
+    AUTOMATION = "automation"
+    CUSTOM = "custom"
+    VISUAL = "visual"
+    WINDOWS = "windows"
+    VOICE = "voice"
+
+
 class MessageRole(str, Enum):
     SYSTEM = "system"
     USER = "user"

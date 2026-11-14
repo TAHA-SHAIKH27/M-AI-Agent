@@ -1,8 +1,7 @@
-"""Tool schemas for M AI Assistant."""
+"""Common schemas shared across modules to avoid circular imports."""
 import msgspec
 from typing import Optional, List, Dict, Any
 from enum import Enum
-from ..core.types import ToolSchema as CoreToolSchema, ToolFunction
 
 
 class ToolRiskLevel(str, Enum):
@@ -22,6 +21,9 @@ class ToolCategory(str, Enum):
     APP = "app"
     AUTOMATION = "automation"
     CUSTOM = "custom"
+    VISUAL = "visual"
+    WINDOWS = "windows"
+    VOICE = "voice"
 
 
 class ToolManifest(msgspec.Struct, frozen=True):
@@ -32,20 +34,20 @@ class ToolManifest(msgspec.Struct, frozen=True):
     category: ToolCategory
     risk_level: ToolRiskLevel
     input_schema: Dict[str, Any]  # JSON Schema
-    output_schema: Dict[str, Any]  # JSON Schema
+    output_schema: Dict[str, Any]
     required_permissions: List[str] = msgspec.field(default_factory=list)
     optional_permissions: List[str] = msgspec.field(default_factory=list)
     risk_description: str = ""
     requires_approval: bool = False
     timeout_seconds: int = 30
-    max_retries: int = 2
+    max_retries: int = 1
     version: str = "1.0.0"
     author: str = "M Core"
     tags: List[str] = msgspec.field(default_factory=list)
 
 
 class ToolInvocation(msgspec.Struct, frozen=True):
-    """A tool invocation request."""
+    """Tool invocation request."""
     tool_name: str
     arguments: Dict[str, Any]
     correlation_id: Optional[str] = None
@@ -80,6 +82,45 @@ class ToolExecutionContext(msgspec.Struct, frozen=True):
     model_provider_factory: Optional[Any] = None
 
 
-# Re-export core types for backward compatibility
-ToolSchema = CoreToolSchema
-ToolFunction = ToolFunction
+# Re-export from model_providers.schemas for backward compatibility
+from m_core.model_providers.schemas import (
+    ChatMessage,
+    ToolSchema,
+    ToolFunction,
+    ModelCapability,
+    ModelInfo,
+    CompletionRequest,
+    CompletionResponse,
+    CompletionUsage,
+    StreamChunk,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    ProviderHealth,
+    FinishReason,
+    MessageRole,
+)
+
+__all__ = [
+    # Common tool schemas
+    "ToolRiskLevel",
+    "ToolCategory",
+    "ToolManifest",
+    "ToolInvocation",
+    "ToolResult",
+    "ToolExecutionContext",
+    # Re-exported model provider schemas
+    "ChatMessage",
+    "ToolSchema",
+    "ToolFunction",
+    "ModelCapability",
+    "ModelInfo",
+    "CompletionRequest",
+    "CompletionResponse",
+    "CompletionUsage",
+    "StreamChunk",
+    "EmbeddingRequest",
+    "EmbeddingResponse",
+    "ProviderHealth",
+    "FinishReason",
+    "MessageRole",
+]

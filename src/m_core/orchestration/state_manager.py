@@ -1,6 +1,7 @@
 """Execution State Manager for M AI Assistant."""
 import asyncio
 import json
+import msgspec
 import uuid
 import structlog
 import msgspec
@@ -10,6 +11,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 
 from ..config import settings
+from ..planning.schemas import ExecutionPlan, RoutingPlan, TaskContext
 from ..utils.logging import get_logger
 from .schemas import (
     TaskExecutionRecord, SubtaskExecutionRecord,
@@ -40,6 +42,7 @@ class ExecutionStateManager:
         self._subtask_records: Dict[str, Dict[str, SubtaskExecutionRecord]] = {}
         self._checkpoints: Dict[str, Checkpoint] = {}
         self._task_checkpoints: Dict[str, List[str]] = {}  # task_id -> checkpoint_ids
+        self._plan_bundles: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._initialized = False
     
@@ -108,15 +111,60 @@ class ExecutionStateManager:
             raise
     
     async def save_execution_state(self, context: OrchestrationContext) -> None:
-        """Save execution state to disk."""
+        """Save execution state, subtask records, and plan bundle to disk."""
         async with self._lock:
             # Update in-memory
             self._execution_records[context.task_id] = context.execution_record
             self._subtask_records[context.task_id] = context.subtask_records
+            if hasattr(context, "execution_plan") and hasattr(context, "routing_plan") and hasattr(context, "task_context"):
+                self._plan_bundles[context.task_id] = {
+                    "execution_plan": context.execution_plan,
+                    "routing_plan": context.routing_plan,
+                    "task_context": context.task_context,
+                }
+                await self._persist_plan_bundle(context.task_id)
             
             # Persist to disk
             await self._persist_execution_record(context.task_id)
             await self._persist_subtask_records(context.task_id)
+    
+    async def _persist_plan_bundle(self, task_id: str) -> None:
+        """Persist ExecutionPlan, RoutingPlan, and TaskContext for full checkpoint/restart recovery."""
+        bundle = self._plan_bundles.get(task_id)
+        if not bundle:
+            return
+        try:
+            plans_dir = self.data_dir / "plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            plan_file = plans_dir / f"{task_id}.json"
+            payload = {
+                "execution_plan": json.loads(msgspec.json.encode(bundle["execution_plan"]).decode("utf-8")),
+                "routing_plan": json.loads(msgspec.json.encode(bundle["routing_plan"]).decode("utf-8")),
+                "task_context": json.loads(msgspec.json.encode(bundle["task_context"]).decode("utf-8")),
+            }
+            plan_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error(f"Failed to persist plan bundle for {task_id}: {e}")
+    
+    async def get_plan_bundle(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve cached or persisted ExecutionPlan, RoutingPlan, and TaskContext."""
+        if task_id in self._plan_bundles:
+            return self._plan_bundles[task_id]
+        plan_file = self.data_dir / "plans" / f"{task_id}.json"
+        if not plan_file.exists():
+            return None
+        try:
+            raw = json.loads(plan_file.read_text(encoding="utf-8"))
+            bundle = {
+                "execution_plan": msgspec.json.decode(json.dumps(raw["execution_plan"]).encode("utf-8"), type=ExecutionPlan),
+                "routing_plan": msgspec.json.decode(json.dumps(raw["routing_plan"]).encode("utf-8"), type=RoutingPlan),
+                "task_context": msgspec.json.decode(json.dumps(raw["task_context"]).encode("utf-8"), type=TaskContext),
+            }
+            self._plan_bundles[task_id] = bundle
+            return bundle
+        except Exception as e:
+            logger.error(f"Failed to load persisted plan bundle for {task_id}: {e}")
+            return None
     
     async def _persist_execution_record(self, task_id: str) -> None:
         """Persist one execution record, or rewrite the complete index when task_id is empty."""
@@ -271,15 +319,34 @@ class ExecutionStateManager:
                         cp_file.unlink()
                 
                 self._task_checkpoints.pop(task_id, None)
+                self._plan_bundles.pop(task_id, None)
+                sub_file = self.data_dir / "subtasks" / f"{task_id}.json"
+                if sub_file.exists():
+                    sub_file.unlink()
+                plan_file = self.data_dir / "plans" / f"{task_id}.json"
+                if plan_file.exists():
+                    plan_file.unlink()
                 cleaned += 1
             
-            # Rewrite execution index
-            await self._persist_execution_record("")  # This will rewrite the whole file
+            # Rewrite execution index cleanly
+            await self._rewrite_execution_index()
         
         if cleaned > 0:
             logger.info(f"Cleaned up {cleaned} old execution records")
         
         return cleaned
+    
+    async def _rewrite_execution_index(self) -> None:
+        """Rewrite the full executions index file from current in-memory records."""
+        try:
+            exec_file = self.data_dir / "executions.json"
+            data = {
+                tid: self._record_to_dict(rec)
+                for tid, rec in self._execution_records.items()
+            }
+            exec_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error(f"Failed to rewrite execution index: {e}")
     
     def _record_to_dict(self, record: TaskExecutionRecord) -> Dict[str, Any]:
         """Convert execution record to dictionary."""

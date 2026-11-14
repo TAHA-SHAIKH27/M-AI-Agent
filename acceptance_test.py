@@ -48,6 +48,7 @@ async def test_application_automation():
     
     # 2. Verify it opened
     print("\n2. Verifying Notepad opened...")
+    await asyncio.sleep(1.5)  # Wait for window to appear
     tool = tool_registry.get_tool("window_list")
     context = ToolExecutionContext(
         tool_name="window_list",
@@ -105,12 +106,13 @@ async def test_application_automation():
         print(f"   Error: {result.error}")
         return False
     
-    # 5. Verify entered text (via OCR)
+    # 5. Verify entered text (via OCR on Notepad window)
     print("\n5. Verifying entered text via OCR...")
+    await asyncio.sleep(0.5)  # Ensure text is rendered
     tool = tool_registry.get_tool("screen_ocr")
     context = ToolExecutionContext(
         tool_name="screen_ocr",
-        arguments={"source": "screen", "language": "eng"},
+        arguments={"source": "window", "window_title": "notepad", "language": "eng", "preprocess": True},
         correlation_id="accept-5",
         user_id="test-user",
         permissions_granted=["screen:ocr"],
@@ -125,13 +127,14 @@ async def test_application_automation():
             print("   PASS: Text found in OCR")
         else:
             print("   WARNING: Exact test text not found in OCR (may be font/position issue)")
+            print(f"   OCR text preview: {text[:200]}")
     
     # 6. Verify screen state
     print("\n6. Verifying screen state...")
     tool = tool_registry.get_tool("visual_verify")
     context = ToolExecutionContext(
         tool_name="visual_verify",
-        arguments={"check_type": "text_present", "search_text": "Phase"},
+        arguments={"check_type": "text_present", "search_text": "Phase", "window_title": "notepad"},
         correlation_id="accept-6",
         user_id="test-user",
         permissions_granted=["screen:verify"],

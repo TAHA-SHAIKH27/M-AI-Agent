@@ -4,7 +4,7 @@ import structlog
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from fastapi.responses import StreamingResponse
 
 from m_core.orchestration import orchestrator
@@ -16,8 +16,9 @@ from m_core.utils.logging import get_logger
 
 from ..schemas import (
     TaskInfo, TaskStatus, TaskListResponse, TaskEvent, TaskEventStream,
-    TaskFilter, TaskBoardStats, ErrorResponse,
+    TaskFilter, TaskBoardStats, TaskApproveRequest, ErrorResponse,
 )
+from ..serializers import execution_record_to_task_info
 from ..dependencies import (
     get_client_info, validate_localhost, APIClientInfo,
 )
@@ -58,49 +59,7 @@ async def list_tasks(
         # Apply offset
         records = records[offset:offset + limit]
         
-        tasks = []
-        for record in records:
-            subtasks = []
-            for sr in record.subtask_records:
-                subtasks.append({
-                    "subtask_id": sr.subtask_id,
-                    "status": sr.status.value,
-                    "assigned_target_type": sr.assigned_target_type,
-                    "assigned_target_id": sr.assigned_target_id,
-                    "started_at": sr.started_at,
-                    "completed_at": sr.completed_at,
-                    "result": sr.result,
-                    "error": sr.error,
-                    "retry_count": sr.retry_count,
-                    "dependencies": sr.dependencies,
-                    "execution_time_ms": sr.execution_time_ms,
-                })
-            
-            status_map = {
-                TaskExecutionStatus.PENDING: "pending",
-                TaskExecutionStatus.QUEUED: "queued",
-                TaskExecutionStatus.RUNNING: "running",
-                TaskExecutionStatus.WAITING: "waiting",
-                TaskExecutionStatus.COMPLETED: "completed",
-                TaskExecutionStatus.FAILED: "failed",
-                TaskExecutionStatus.CANCELLED: "cancelled",
-                TaskExecutionStatus.REPLANNING: "replanning",
-                TaskExecutionStatus.AWAITING_APPROVAL: "awaiting_approval",
-            }
-            
-            tasks.append(TaskInfo(
-                task_id=record.task_id,
-                status=status_map.get(record.status, "pending"),
-                conversation_id=record.conversation_id,
-                created_at=record.created_at,
-                started_at=record.started_at,
-                completed_at=record.completed_at,
-                error=record.error,
-                error_code=record.error_code,
-                subtasks=subtasks,
-                result=record.result,
-                metadata=record.metadata,
-            ))
+        tasks = [execution_record_to_task_info(record) for record in records]
         
         # Get total count for pagination
         all_records = await state_manager.list_executions(status=status_filter, limit=10000)
@@ -197,47 +156,7 @@ async def get_task(
                 },
             )
         
-        subtasks = []
-        for sr in execution_record.subtask_records:
-            subtasks.append({
-                "subtask_id": sr.subtask_id,
-                "status": sr.status.value,
-                "assigned_target_type": sr.assigned_target_type,
-                "assigned_target_id": sr.assigned_target_id,
-                "started_at": sr.started_at,
-                "completed_at": sr.completed_at,
-                "result": sr.result,
-                "error": sr.error,
-                "retry_count": sr.retry_count,
-                "dependencies": sr.dependencies,
-                "execution_time_ms": sr.execution_time_ms,
-            })
-        
-        status_map = {
-            TaskExecutionStatus.PENDING: "pending",
-            TaskExecutionStatus.QUEUED: "queued",
-            TaskExecutionStatus.RUNNING: "running",
-            TaskExecutionStatus.WAITING: "waiting",
-            TaskExecutionStatus.COMPLETED: "completed",
-            TaskExecutionStatus.FAILED: "failed",
-            TaskExecutionStatus.CANCELLED: "cancelled",
-            TaskExecutionStatus.REPLANNING: "replanning",
-            TaskExecutionStatus.AWAITING_APPROVAL: "awaiting_approval",
-        }
-        
-        return TaskInfo(
-            task_id=execution_record.task_id,
-            status=status_map.get(execution_record.status, "pending"),
-            conversation_id=execution_record.conversation_id,
-            created_at=execution_record.created_at,
-            started_at=execution_record.started_at,
-            completed_at=execution_record.completed_at,
-            error=execution_record.error,
-            error_code=execution_record.error_code,
-            subtasks=subtasks,
-            result=execution_record.result,
-            metadata=execution_record.metadata,
-        )
+        return execution_record_to_task_info(execution_record)
         
     except HTTPException:
         raise
@@ -345,13 +264,12 @@ async def approve_task(
     subtask_id: Optional[str] = None,
     approved: bool = True,
     reason: Optional[str] = None,
+    body: Optional[TaskApproveRequest] = Body(default=None),
     client: APIClientInfo = Depends(get_client_info),
     _: None = Depends(validate_localhost),
 ) -> TaskInfo:
     """Approve or deny a task action."""
-    from ..schemas import TaskApproveRequest
-    
-    request = TaskApproveRequest(
+    request = body if body is not None else TaskApproveRequest(
         subtask_id=subtask_id,
         approved=approved,
         reason=reason,
@@ -374,7 +292,7 @@ async def approve_task(
                 },
             )
         
-        return await get_task(task_id)
+        return await get_task(task_id, client)
         
     except HTTPException:
         raise
@@ -434,30 +352,90 @@ async def list_checkpoints(
 
 
 @router.post(
-    "/{task_id}/resume",
-    summary="Resume task from checkpoint",
-    description="Resume task execution from a specific checkpoint",
+    "/{task_id}/pause",
+    response_model=TaskInfo,
+    summary="Pause a running task",
+    description="Pause an active task cooperatively at the next step or subtask boundary",
 )
-async def resume_from_checkpoint(
+async def pause_task(
     task_id: str,
-    checkpoint_id: str,
     client: APIClientInfo = Depends(get_client_info),
     _: None = Depends(validate_localhost),
 ) -> TaskInfo:
-    """Resume task execution from a checkpoint."""
+    """Pause a running task."""
     try:
-        record = await orchestrator.resume_from_checkpoint(checkpoint_id)
-        
-        if not record or record.task_id != task_id:
+        success = await orchestrator.pause_task(task_id)
+        if not success:
             raise HTTPException(
                 status_code=404,
                 detail={
-                    "error": f"Checkpoint '{checkpoint_id}' not found for task '{task_id}'",
-                    "error_code": "CHECKPOINT_NOT_FOUND",
+                    "error": f"Task '{task_id}' not found or not pausable",
+                    "error_code": "TASK_NOT_PAUSABLE",
                 },
             )
+        return await get_task(task_id, client)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("pause_task_failed", task_id=task_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Failed to pause task",
+                "error_code": "TASK_PAUSE_FAILED",
+                "details": {"message": str(e)},
+            },
+        )
+
+
+@router.post(
+    "/{task_id}/resume",
+    response_model=TaskInfo,
+    summary="Resume task or checkpoint",
+    description="Resume a paused task or resume execution from a specific checkpoint",
+)
+async def resume_from_checkpoint(
+    task_id: str,
+    checkpoint_id: Optional[str] = Query(None, description="Optional checkpoint ID to resume from"),
+    client: APIClientInfo = Depends(get_client_info),
+    _: None = Depends(validate_localhost),
+) -> TaskInfo:
+    """Resume a paused task or resume execution from a checkpoint."""
+    try:
+        if checkpoint_id:
+            cp = await state_manager.get_checkpoint(checkpoint_id)
+            if not cp or cp.task_id != task_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": f"Checkpoint '{checkpoint_id}' not found for task '{task_id}'",
+                        "error_code": "CHECKPOINT_NOT_FOUND",
+                    },
+                )
+            record = await orchestrator.resume_from_checkpoint(checkpoint_id)
+            if not record or record.task_id != task_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": f"Checkpoint '{checkpoint_id}' not found for task '{task_id}'",
+                        "error_code": "CHECKPOINT_NOT_FOUND",
+                    },
+                )
+        else:
+            resumed = await orchestrator.resume_task(task_id)
+            if not resumed:
+                latest_cp = await state_manager.get_latest_checkpoint(task_id)
+                if not latest_cp:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={
+                            "error": f"Task '{task_id}' is not paused and has no checkpoint to resume from",
+                            "error_code": "TASK_NOT_RESUMABLE",
+                        },
+                    )
+                await orchestrator.resume_from_checkpoint(latest_cp.checkpoint_id)
         
-        return await get_task(task_id)
+        return await get_task(task_id, client)
         
     except HTTPException:
         raise

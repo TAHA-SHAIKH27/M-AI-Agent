@@ -21,6 +21,18 @@ from .ollama import OllamaProvider
 from .lm_studio import LMStudioProvider
 from .openai_provider import OpenAIProvider
 from .anthropic import AnthropicProvider
+from .vision_provider import (
+    VisionProviderType,
+    VisionConfig,
+    VisionAction,
+    ScreenAnalysis,
+    BaseVisionProvider,
+    NVIDIANIMVisionProvider,
+    GeminiVisionProvider,
+    VisionProviderFactory,
+    get_vision_factory,
+    close_vision_factory,
+)
 
 __all__ = [
     # Schemas
@@ -34,4 +46,15 @@ __all__ = [
     # Providers
     "NVIDIANemotronProvider", "OllamaProvider", "LMStudioProvider",
     "OpenAIProvider", "AnthropicProvider",
+    # Vision
+    "VisionProviderType",
+    "VisionConfig",
+    "VisionAction",
+    "ScreenAnalysis",
+    "BaseVisionProvider",
+    "NVIDIANIMVisionProvider",
+    "GeminiVisionProvider",
+    "VisionProviderFactory",
+    "get_vision_factory",
+    "close_vision_factory",
 ]

@@ -1,5 +1,5 @@
 """Tools package for M AI Assistant."""
-from .schemas import (
+from m_core.common_schemas import (
     ToolManifest,
     ToolInvocation,
     ToolResult,

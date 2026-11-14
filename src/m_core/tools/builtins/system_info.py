@@ -5,7 +5,7 @@ import uuid
 import structlog
 from typing import Dict, Any, Optional
 
-from ..schemas import ToolExecutionContext, ToolResult
+from m_core.common_schemas import ToolExecutionContext, ToolResult
 from ..base import BaseTool
 
 logger = structlog.get_logger(__name__)

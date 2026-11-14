@@ -19,7 +19,7 @@ from .middleware import (
     RequestLoggingMiddleware, ErrorHandlingMiddleware, SecurityMiddleware,
 )
 from .dependencies import validate_localhost
-from ..websocket import websocket_router
+from ..websocket import websocket_router, register_event_handlers
 
 logger = get_logger(__name__)
 
@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize orchestrator (which initializes scheduler, state_manager, etc.)
     from m_core.orchestration import orchestrator
     await orchestrator.initialize()
+    await register_event_handlers()
     
     logger.info("api_server_started", host=settings.api_host, port=settings.api_port)
     
@@ -44,9 +45,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Shutdown
     logger.info("api_server_shutting_down")
     
-    # Shutdown orchestrator
-    from m_core.orchestration import scheduler
+    # Shutdown orchestrator, autonomous executor, desktop & provider resources
+    from m_core.orchestration import scheduler, autonomous_executor
+    from m_core.desktop import desktop_automation
+    from m_core.model_providers import provider_factory, close_vision_factory
+
     await scheduler.shutdown()
+    for cleanup in (
+        autonomous_executor.close,
+        desktop_automation.close,
+        provider_factory.close,
+        close_vision_factory,
+    ):
+        try:
+            await cleanup()
+        except Exception as e:
+            logger.warning("api_server_cleanup_error", error=str(e))
     
     # Run lifecycle shutdown hooks
     await lifecycle.shutdown()

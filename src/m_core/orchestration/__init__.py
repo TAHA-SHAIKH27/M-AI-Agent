@@ -19,6 +19,7 @@ from .execution_manager import ExecutionManager, execution_manager
 from .state_manager import ExecutionStateManager, state_manager
 from .recovery import FailureRecoveryManager, recovery_manager
 from .evaluator import ResultEvaluator, evaluator
+from .autonomous_executor import AutonomousTaskExecutor, autonomous_executor
 
 __all__ = [
     # Schemas
@@ -47,4 +48,6 @@ __all__ = [
     "recovery_manager",
     "ResultEvaluator",
     "evaluator",
+    "AutonomousTaskExecutor",
+    "autonomous_executor",
 ]

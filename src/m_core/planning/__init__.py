@@ -20,6 +20,12 @@ from .schemas import (
 from .task_understanding import TaskUnderstandingEngine, task_understanding
 from .planner import IntelligentPlanner, planner
 from .router import IntelligentRouter, router
+from .router_enhanced import (
+    ControlMethod,
+    ControlMethodSelector,
+    EnhancedIntelligentRouter,
+    enhanced_router,
+)
 
 __all__ = [
     # Schemas
@@ -46,4 +52,8 @@ __all__ = [
     "planner",
     "IntelligentRouter",
     "router",
+    "ControlMethod",
+    "ControlMethodSelector",
+    "EnhancedIntelligentRouter",
+    "enhanced_router",
 ]

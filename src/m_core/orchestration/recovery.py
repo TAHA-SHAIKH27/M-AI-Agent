@@ -1,12 +1,13 @@
 """Failure Recovery Manager for M AI Assistant."""
 import asyncio
+import msgspec
 import structlog
 import random
-from typing import Optional, List, Dict, Any, Callable, Awaitable
+from typing import Optional, List, Dict, Any, Callable, Awaitable, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 
-from ..planning import planner, router
+from ..planning import planner, router, enhanced_router
 from ..planning.schemas import (
     ExecutionPlan, RoutingPlan, Subtask, RoutingDecision,
     RoutingTargetType, ApprovalStatus,
@@ -45,6 +46,7 @@ class FailureRecoveryManager:
         self._retry_policies: Dict[str, Dict[str, Any]] = {}
         self._max_replans = 3
         self._replan_counts: Dict[str, int] = {}
+        self._replanned_bundles: Dict[str, Tuple[ExecutionPlan, RoutingPlan]] = {}
         self._initialized = False
     
     async def initialize(self) -> None:
@@ -116,6 +118,28 @@ class FailureRecoveryManager:
                 failed_subtask_id=failed_subtask_id,
                 action=RecoveryAction.CANCEL,
                 reason="Failed subtask or record not found",
+            )
+        
+        if (
+            failed_record.status == SubtaskExecutionStatus.AWAITING_APPROVAL
+            or context.execution_record.status == TaskExecutionStatus.AWAITING_APPROVAL
+        ):
+            return RecoveryPlan(
+                task_id=context.task_id,
+                failed_subtask_id=failed_subtask_id,
+                action=RecoveryAction.ESCALATE,
+                reason=failed_record.error or "Action requires explicit user approval",
+            )
+        
+        if (
+            failed_record.status == SubtaskExecutionStatus.CANCELLED
+            or context.execution_record.status == TaskExecutionStatus.CANCELLED
+        ):
+            return RecoveryPlan(
+                task_id=context.task_id,
+                failed_subtask_id=failed_subtask_id,
+                action=RecoveryAction.CANCEL,
+                reason="Task cancelled by user",
             )
         
         # Increment retry count
@@ -217,8 +241,8 @@ class FailureRecoveryManager:
                         fallback_target={"type": "provider", "id": fallback_provider},
                     )
         
-        # If subtask requires approval and failed, don't auto-retry
-        if failed_subtask.requires_approval:
+        # If subtask requires approval and wasn't explicitly granted yet, don't auto-replan
+        if failed_subtask.requires_approval and failed_subtask.approval_status != ApprovalStatus.GRANTED:
             return RecoveryPlan(
                 task_id=context.task_id,
                 failed_subtask_id=failed_subtask.id,
@@ -266,7 +290,12 @@ class FailureRecoveryManager:
         )
         
         # Create new routing plan
-        new_routing = await router.create_routing_plan(new_plan)
+        try:
+            new_routing = await enhanced_router.create_routing_plan(new_plan)
+        except Exception:
+            new_routing = await router.create_routing_plan(new_plan)
+        
+        self._replanned_bundles[new_plan.task_id] = (new_plan, new_routing)
         
         return RecoveryPlan(
             task_id=context.task_id,
@@ -275,6 +304,12 @@ class FailureRecoveryManager:
             reason=f"Replanning after failure (attempt {replan_count + 1})",
             new_execution_plan_id=new_plan.task_id,
         )
+    
+    def pop_replanned_bundle(self, new_plan_id: Optional[str]) -> Optional[Tuple[ExecutionPlan, RoutingPlan]]:
+        """Retrieve and clear a stored replanned (ExecutionPlan, RoutingPlan) pair."""
+        if not new_plan_id:
+            return None
+        return self._replanned_bundles.pop(new_plan_id, None)
     
     def _calculate_backoff(
         self,
@@ -341,48 +376,23 @@ class FailureRecoveryManager:
             
             return await execute_subtask(recovery_plan.failed_subtask_id)
         
-        elif recovery_plan.action == RecoveryAction.FALLBACK_TOOL:
-            fb_target = recovery_plan.fallback_target
-            # Update routing decision
-            routing_decision = next(
-                (d for d in context.routing_plan.decisions if d.subtask_id == recovery_plan.failed_subtask_id),
-                None
+        elif recovery_plan.action in (
+            RecoveryAction.FALLBACK_TOOL,
+            RecoveryAction.FALLBACK_AGENT,
+            RecoveryAction.FALLBACK_PROVIDER,
+        ):
+            fb_target = recovery_plan.fallback_target or {}
+            target_type_map = {
+                RecoveryAction.FALLBACK_TOOL: RoutingTargetType.TOOL,
+                RecoveryAction.FALLBACK_AGENT: RoutingTargetType.AGENT,
+                RecoveryAction.FALLBACK_PROVIDER: RoutingTargetType.MODEL_PROVIDER,
+            }
+            self._replace_routing_target(
+                context,
+                recovery_plan.failed_subtask_id,
+                target_type_map[recovery_plan.action],
+                fb_target.get("id", ""),
             )
-            if routing_decision:
-                routing_decision.target_type = RoutingTargetType.TOOL
-                routing_decision.target_id = fb_target["id"]
-            
-            failed_record = context.subtask_records[recovery_plan.failed_subtask_id]
-            failed_record.status = SubtaskExecutionStatus.PENDING
-            failed_record.retry_count = 0
-            
-            return await execute_subtask(recovery_plan.failed_subtask_id)
-        
-        elif recovery_plan.action == RecoveryAction.FALLBACK_AGENT:
-            fb_target = recovery_plan.fallback_target
-            routing_decision = next(
-                (d for d in context.routing_plan.decisions if d.subtask_id == recovery_plan.failed_subtask_id),
-                None
-            )
-            if routing_decision:
-                routing_decision.target_type = RoutingTargetType.AGENT
-                routing_decision.target_id = fb_target["id"]
-            
-            failed_record = context.subtask_records[recovery_plan.failed_subtask_id]
-            failed_record.status = SubtaskExecutionStatus.PENDING
-            failed_record.retry_count = 0
-            
-            return await execute_subtask(recovery_plan.failed_subtask_id)
-        
-        elif recovery_plan.action == RecoveryAction.FALLBACK_PROVIDER:
-            fb_target = recovery_plan.fallback_target
-            routing_decision = next(
-                (d for d in context.routing_plan.decisions if d.subtask_id == recovery_plan.failed_subtask_id),
-                None
-            )
-            if routing_decision:
-                routing_decision.target_type = RoutingTargetType.MODEL_PROVIDER
-                routing_decision.target_id = fb_target["id"]
             
             failed_record = context.subtask_records[recovery_plan.failed_subtask_id]
             failed_record.status = SubtaskExecutionStatus.PENDING
@@ -432,6 +442,36 @@ class FailureRecoveryManager:
             
             return {"success": False, "cancelled": True, "reason": recovery_plan.reason}
     
+    def _replace_routing_target(
+        self,
+        context: RecoveryContext,
+        subtask_id: Optional[str],
+        new_target_type: RoutingTargetType,
+        new_target_id: str,
+    ) -> None:
+        """Replace frozen RoutingDecision target in context.routing_plan safely."""
+        if not subtask_id or not new_target_id:
+            return
+        updated_decisions: List[RoutingDecision] = []
+        changed = False
+        for d in context.routing_plan.decisions:
+            if d.subtask_id == subtask_id:
+                updated_decisions.append(
+                    msgspec.structs.replace(
+                        d,
+                        target_type=new_target_type,
+                        target_id=new_target_id,
+                    )
+                )
+                changed = True
+            else:
+                updated_decisions.append(d)
+        if changed:
+            context.routing_plan = msgspec.structs.replace(
+                context.routing_plan,
+                decisions=updated_decisions,
+            )
+
     def get_replan_count(self, task_id: str) -> int:
         """Get number of replans for a task."""
         return self._replan_counts.get(task_id, 0)
