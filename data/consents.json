@@ -2,7 +2,7 @@
   "file:read": {
     "capability": "file:read",
     "granted": true,
-    "granted_at": "2026-11-08T13:49:38.659874",
+    "granted_at": "2026-11-14T13:30:34.156823",
     "expires_at": null,
     "scope": "global",
     "metadata": {}
@@ -10,7 +10,7 @@
   "file:list": {
     "capability": "file:list",
     "granted": true,
-    "granted_at": "2026-11-08T13:49:38.661830",
+    "granted_at": "2026-11-14T13:30:34.160735",
     "expires_at": null,
     "scope": "global",
     "metadata": {}
@@ -18,7 +18,7 @@
   "file:search": {
     "capability": "file:search",
     "granted": true,
-    "granted_at": "2026-11-08T13:49:38.663835",
+    "granted_at": "2026-11-11T15:22:44.354421",
     "expires_at": null,
     "scope": "global",
     "metadata": {}
@@ -26,7 +26,7 @@
   "web:search": {
     "capability": "web:search",
     "granted": true,
-    "granted_at": "2026-11-08T13:49:38.665439",
+    "granted_at": "2026-11-11T15:22:44.356614",
     "expires_at": null,
     "scope": "global",
     "metadata": {}
@@ -34,7 +34,7 @@
   "system:info": {
     "capability": "system:info",
     "granted": true,
-    "granted_at": "2026-11-08T13:49:38.667420",
+    "granted_at": "2026-11-14T13:30:34.162440",
     "expires_at": null,
     "scope": "global",
     "metadata": {}
@@ -42,7 +42,7 @@
   "model:chat": {
     "capability": "model:chat",
     "granted": true,
-    "granted_at": "2026-11-08T13:49:41.102750",
+    "granted_at": "2026-11-11T15:18:41.885786",
     "expires_at": null,
     "scope": "global",
     "metadata": {}
@@ -50,32 +50,32 @@
   "app:control": {
     "capability": "app:control",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:14.966824",
-    "expires_at": "2026-11-08T14:48:14.966816",
+    "granted_at": "2026-11-11T15:51:06.772853",
+    "expires_at": "2026-11-11T16:51:06.772844",
     "scope": "global",
     "metadata": {}
   },
   "app:launch": {
     "capability": "app:launch",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:15.037100",
-    "expires_at": "2026-11-08T14:48:15.037089",
+    "granted_at": "2026-11-11T15:51:06.772154",
+    "expires_at": "2026-11-11T16:51:06.772140",
     "scope": "global",
     "metadata": {}
   },
   "system:admin": {
     "capability": "system:admin",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:14.967306",
-    "expires_at": "2026-11-08T14:48:14.967298",
+    "granted_at": "2026-11-08T17:09:14.338071",
+    "expires_at": "2026-11-08T18:09:14.338053",
     "scope": "global",
     "metadata": {}
   },
   "file:write": {
     "capability": "file:write",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:10.797014",
-    "expires_at": "2026-11-08T14:48:10.796999",
+    "granted_at": "2026-11-14T13:30:34.158696",
+    "expires_at": null,
     "scope": "global",
     "metadata": {}
   },
@@ -106,48 +106,64 @@
   "screen:capture": {
     "capability": "screen:capture",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:14.662264",
-    "expires_at": "2026-11-08T14:48:14.662257",
+    "granted_at": "2026-11-11T15:51:06.774583",
+    "expires_at": "2026-11-11T16:51:06.774575",
     "scope": "global",
     "metadata": {}
   },
   "screen:ocr": {
     "capability": "screen:ocr",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:14.662735",
-    "expires_at": "2026-11-08T14:48:14.662729",
+    "granted_at": "2026-11-11T15:51:06.775017",
+    "expires_at": "2026-11-11T16:51:06.775011",
     "scope": "global",
     "metadata": {}
   },
   "screen:find": {
     "capability": "screen:find",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:10.809761",
-    "expires_at": "2026-11-08T14:48:10.809752",
+    "granted_at": "2026-11-11T15:51:06.775435",
+    "expires_at": "2026-11-11T16:51:06.775428",
     "scope": "global",
     "metadata": {}
   },
   "automation:input": {
     "capability": "automation:input",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:14.663622",
-    "expires_at": "2026-11-08T14:48:14.663616",
+    "granted_at": "2026-11-11T15:51:06.774000",
+    "expires_at": "2026-11-11T16:51:06.773992",
     "scope": "global",
     "metadata": {}
   },
   "automation:window": {
     "capability": "automation:window",
     "granted": true,
-    "granted_at": "2026-11-08T00:50:15.445796",
-    "expires_at": "2026-11-08T01:50:15.445739",
+    "granted_at": "2026-11-11T15:51:06.773510",
+    "expires_at": "2026-11-11T16:51:06.773482",
     "scope": "global",
     "metadata": {}
   },
   "screen:verify": {
     "capability": "screen:verify",
     "granted": true,
-    "granted_at": "2026-11-08T13:48:14.663186",
-    "expires_at": "2026-11-08T14:48:14.663180",
+    "granted_at": "2026-11-11T15:51:06.776059",
+    "expires_at": "2026-11-11T16:51:06.776049",
+    "scope": "global",
+    "metadata": {}
+  },
+  "memory:read": {
+    "capability": "memory:read",
+    "granted": true,
+    "granted_at": "2026-11-14T13:30:34.152505",
+    "expires_at": null,
+    "scope": "global",
+    "metadata": {}
+  },
+  "memory:write": {
+    "capability": "memory:write",
+    "granted": true,
+    "granted_at": "2026-11-14T13:30:34.154820",
+    "expires_at": null,
     "scope": "global",
     "metadata": {}
   }
