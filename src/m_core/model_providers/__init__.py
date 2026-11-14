@@ -31,6 +31,7 @@ from .vision_provider import (
     GeminiVisionProvider,
     VisionProviderFactory,
     get_vision_factory,
+    close_vision_factory,
 )
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     "GeminiVisionProvider",
     "VisionProviderFactory",
     "get_vision_factory",
+    "close_vision_factory",
 ]

@@ -1,6 +1,8 @@
 """Intelligent Planner for M AI Assistant."""
 import asyncio
+import re
 import uuid
+import msgspec
 import structlog
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
@@ -27,7 +29,7 @@ logger = get_logger(__name__)
 
 
 # System prompt for planning
-PLANNING_PROMPT = """You are a task planner for an AI assistant. Given a task analysis, create a detailed execution plan with subtasks.
+PLANNING_PROMPT = """You are a task planner for M, an autonomous Windows AI assistant. Given a task analysis, create a clear execution plan with logical subtasks.
 
 Return a JSON object with this structure:
 {
@@ -35,16 +37,19 @@ Return a JSON object with this structure:
     {
       "id": "unique_id",
       "name": "Subtask name",
-      "description": "What this subtask does",
+      "description": "What this subtask must accomplish",
       "task_type": "tool_use|simple|multi_step|complex",
+      "execution_mode": "direct|autonomous_desktop|autonomous_browser",
       "assigned_agent": "agent_id_or_null",
       "assigned_tool": "tool_name_or_null",
-      "dependencies": ["subtask_id_1", "subtask_id_2"],
+      "arguments": {},
+      "dependencies": ["subtask_id_1"],
       "priority": 10,
-      "estimated_duration_seconds": 10.0,
+      "estimated_duration_seconds": 15.0,
       "max_retries": 2,
-      "timeout_seconds": 60.0,
-      "requires_approval": false
+      "timeout_seconds": 180.0,
+      "requires_approval": false,
+      "expected_output": "Observable end-state or deliverable"
     }
   ],
   "strategy": "sequential|parallel|dependency_aware",
@@ -53,19 +58,12 @@ Return a JSON object with this structure:
 }
 
 Rules:
-1. Break complex tasks into logical subtasks
-2. Identify dependencies between subtasks (what must complete before what)
-3. Assign appropriate agents/tools based on capabilities
-4. Set priorities (higher = more important/earlier)
-5. Estimate realistic durations
-6. Mark subtasks requiring approval (system admin, file delete, etc.)
-7. Use dependency_aware strategy for complex tasks
-8. Max 10 subtasks per plan
-9. Avoid circular dependencies
-10. Consider available agents and tools
-
-Available agents and their capabilities will be provided.
-Available tools and their capabilities will be provided."""
+1. NEVER hardcode screen coordinates (x, y) — dynamic GUI/visual identification discovers elements at runtime.
+2. For Windows UI workflows (clicking buttons/menus, typing into live apps, switching apps, handling Save dialogs), prefer a cohesive subtask with `"execution_mode": "autonomous_desktop"` describing the concrete goal and `expected_output` (or separate logical phases for distinct apps/phases).
+3. For live web page interaction requiring DOM/clicking/forms, use `"execution_mode": "autonomous_browser"`.
+4. Use direct `assigned_tool` + `arguments` only for self-contained operations (e.g., `system_info`, `process_list`, `web_search`, `file_read`, `file_write`, `file_delete`, `app_launch`).
+5. Mark subtasks `requires_approval: true` when deleting files, modifying system settings, running administrative/PowerShell commands, launching/controlling apps, or saving/overwriting files.
+6. Avoid circular dependencies; max 10 subtasks per plan."""
 
 
 class IntelligentPlanner:
@@ -111,12 +109,8 @@ class IntelligentPlanner:
         
         task_id = str(uuid.uuid4())[:8]
         
-        # Check if this is a Word document creation task - use specialized fallback
-        request_lower = original_request.lower()
-        is_word_task = "word" in request_lower and ("create" in request_lower or "document" in request_lower or "write" in request_lower)
-        
-        # Simple tasks don't need complex planning
-        if analysis.task_type == TaskType.SIMPLE:
+        # Simple conversational/factual tasks don't need complex planning
+        if analysis.task_type == TaskType.SIMPLE and not analysis.metadata.get("autonomous_execution"):
             plan = self._create_simple_plan(task_id, analysis, original_request)
             await event_bus.publish_sync(
                 "task.planned",
@@ -125,8 +119,8 @@ class IntelligentPlanner:
             )
             return plan
         
-        # Tool-use tasks
-        if analysis.task_type == TaskType.TOOL_USE:
+        # Single-step deterministic tool-use tasks (not needing UI autonomy)
+        if analysis.task_type == TaskType.TOOL_USE and not analysis.metadata.get("autonomous_execution"):
             plan = await self._create_tool_plan(task_id, analysis, original_request)
             await event_bus.publish_sync(
                 "task.planned",
@@ -135,17 +129,7 @@ class IntelligentPlanner:
             )
             return plan
         
-        # For Word document creation, use specialized fallback plan
-        if is_word_task:
-            plan = self._create_fallback_plan(task_id, analysis, original_request)
-            await event_bus.publish_sync(
-                "task.planned",
-                "planner",
-                {"task_id": task_id, "subtask_count": len(plan.subtasks), "strategy": plan.strategy.value}
-            )
-            return plan
-        
-        # Multi-step and complex tasks use LLM planning
+        # Multi-step, complex, and autonomous desktop/browser tasks use LLM planning with structured fallback
         plan = await self._llm_plan(task_id, analysis, original_request, context)
         
         await event_bus.publish_sync(
@@ -188,43 +172,66 @@ class IntelligentPlanner:
         analysis: TaskAnalysis,
         original_request: str,
     ) -> ExecutionPlan:
-        """Create plan for tool-use tasks."""
+        """Create plan for deterministic tool-use tasks."""
         subtasks = []
         
         # Determine which tools are needed
         required_tools = []
         for req in analysis.requirements:
             if req.required:
-                # Find matching tool
                 tool_name = self._find_tool_for_capability(req.capability)
                 if tool_name:
                     required_tools.append((tool_name, req))
         
-        # If no specific tools found, use general search
-        if not required_tools and analysis.needs_tools:
+        # If no specific tools found, use general search unless destructive
+        if not required_tools and analysis.needs_tools and not analysis.metadata.get("is_destructive"):
             required_tools.append(("web_search", TaskRequirement(
                 capability="web:search", description="Search the web", required=True
             )))
         
-        # Create subtasks for each tool
+        gui_tools_requiring_observation = {"keyboard_input", "mouse_control", "window_interact", "visual_find", "web_automate"}
+        
         for i, (tool_name, req) in enumerate(required_tools):
-            requires_approval = self._requires_approval(tool_name)
-            subtask = Subtask(
-                id=f"{task_id}-{i+1}",
-                name=f"Execute {tool_name}",
-                description=req.description,
-                task_type=TaskType.TOOL_USE,
-                assigned_tool=tool_name,
-                priority=10 - i,
-                estimated_duration_seconds=10.0,
-                max_retries=2,
-                timeout_seconds=60.0,
-                requires_approval=requires_approval,
-                approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
-            )
+            requires_approval = self._requires_approval(tool_name, original_request, analysis)
+            arguments = self._generate_tool_arguments(tool_name, req, original_request)
+            
+            # If tool requires dynamic UI state and static args aren't concrete, hand off to autonomous loop
+            if tool_name in gui_tools_requiring_observation and not arguments:
+                execution_mode = "autonomous_browser" if tool_name == "web_automate" else "autonomous_desktop"
+                subtask = Subtask(
+                    id=f"{task_id}-{i+1}",
+                    name=f"Execute UI step: {req.description}",
+                    description=original_request or req.description,
+                    task_type=TaskType.MULTI_STEP,
+                    priority=10 - i,
+                    estimated_duration_seconds=30.0,
+                    max_retries=2,
+                    timeout_seconds=180.0,
+                    requires_approval=requires_approval,
+                    approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
+                    metadata={
+                        "execution_mode": execution_mode,
+                        "goal": original_request or req.description,
+                        "original_request": original_request,
+                    },
+                )
+            else:
+                subtask = Subtask(
+                    id=f"{task_id}-{i+1}",
+                    name=f"Execute {tool_name}",
+                    description=req.description or original_request,
+                    task_type=TaskType.TOOL_USE,
+                    assigned_tool=tool_name,
+                    priority=10 - i,
+                    estimated_duration_seconds=10.0,
+                    max_retries=2,
+                    timeout_seconds=60.0,
+                    requires_approval=requires_approval,
+                    approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
+                    metadata={"arguments": arguments} if arguments else {},
+                )
             subtasks.append(subtask)
         
-        # Add final synthesis subtask if multiple tools
         if len(subtasks) > 1:
             synthesis = Subtask(
                 id=f"{task_id}-synthesis",
@@ -245,7 +252,7 @@ class IntelligentPlanner:
             analysis=analysis,
             subtasks=subtasks,
             strategy=ExecutionStrategy.DEPENDENCY_AWARE if len(subtasks) > 1 else ExecutionStrategy.SEQUENTIAL,
-            max_concurrency=min(3, len(subtasks)),
+            max_concurrency=min(3, max(1, len(subtasks))),
             total_estimated_duration=total_duration,
         )
     
@@ -332,7 +339,6 @@ Available Tools:
     ) -> ExecutionPlan:
         """Parse LLM planning response."""
         import json
-        import re
         
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if not json_match:
@@ -341,59 +347,98 @@ Available Tools:
         try:
             data = json.loads(json_match.group())
             
-            subtasks = []
-            for s in data.get("subtasks", [])[:10]:  # Max 10 subtasks
-                # Validate dependencies
-                deps = s.get("dependencies", [])
+            subtasks: List[Subtask] = []
+            raw_subtasks = data.get("subtasks", [])[:10]
+            if not raw_subtasks:
+                return self._create_fallback_plan(task_id, analysis, original_request)
+            
+            gui_tools = {"keyboard_input", "mouse_control", "window_interact", "visual_find", "web_automate"}
+            
+            for idx, s in enumerate(raw_subtasks):
+                deps = list(s.get("dependencies", []) or [])
+                task_type_str = s.get("task_type", "tool_use")
+                try:
+                    task_type = TaskType(task_type_str)
+                except ValueError:
+                    task_type = TaskType.TOOL_USE
                 
-                # Parse task_type safely - default to tool_use if invalid
-            task_type_str = s.get("task_type", "tool_use")
-            try:
-                task_type = TaskType(task_type_str)
-            except ValueError:
-                task_type = TaskType.TOOL_USE
+                assigned_tool = s.get("assigned_tool")
+                assigned_agent = s.get("assigned_agent")
+                if isinstance(assigned_tool, str) and assigned_tool.lower() in ("null", "none", ""):
+                    assigned_tool = None
+                if isinstance(assigned_agent, str) and assigned_agent.lower() in ("null", "none", ""):
+                    assigned_agent = None
+                
+                execution_mode = s.get("execution_mode")
+                llm_args = s.get("arguments") or s.get("tool_arguments") or {}
+                if not isinstance(llm_args, dict):
+                    llm_args = {}
+                # Never trust LLM-injected approval bypass flags
+                llm_args.pop("approved", None)
+                llm_args.pop("approval_token", None)
+                
+                if not llm_args and assigned_tool:
+                    llm_args = self._generate_tool_arguments(assigned_tool, None, s.get("description") or original_request)
+                
+                # Detect autonomous UI subtasks: convert coordinate-less GUI tools or explicit autonomous mode
+                if not execution_mode:
+                    if analysis.metadata.get("autonomous_execution") and (
+                        assigned_tool in gui_tools or task_type in (TaskType.MULTI_STEP, TaskType.COMPLEX)
+                    ):
+                        execution_mode = (
+                            "autonomous_browser"
+                            if analysis.intent.primary == "browser_automation" or assigned_tool == "web_automate"
+                            else "autonomous_desktop"
+                        )
+                    elif assigned_tool in gui_tools and not llm_args:
+                        execution_mode = "autonomous_browser" if assigned_tool == "web_automate" else "autonomous_desktop"
+                
+                if execution_mode in ("autonomous_desktop", "autonomous_browser"):
+                    # Keep autonomous subtasks routed cleanly to autonomous executor rather than dummy tool calls
+                    assigned_tool = None
+                
+                subtask_desc = s.get("description", "") or original_request
+                requires_approval = bool(s.get("requires_approval", False)) or self._requires_approval(
+                    assigned_tool, f"{s.get('name', '')} {subtask_desc} {original_request}", analysis
+                )
+                
+                metadata: Dict[str, Any] = {}
+                if llm_args:
+                    metadata["arguments"] = llm_args
+                if execution_mode and execution_mode != "direct":
+                    metadata["execution_mode"] = execution_mode
+                    metadata["goal"] = subtask_desc
+                    metadata["original_request"] = original_request
+                if s.get("expected_output"):
+                    metadata["expected_output"] = s["expected_output"]
+                if s.get("target_app"):
+                    metadata["target_app"] = s["target_app"]
+                
+                subtask = Subtask(
+                    id=str(s.get("id") or f"{task_id}-{idx+1}"),
+                    name=str(s.get("name") or f"Subtask {idx+1}"),
+                    description=subtask_desc,
+                    task_type=task_type,
+                    assigned_agent=assigned_agent,
+                    assigned_tool=assigned_tool,
+                    dependencies=deps,
+                    priority=int(s.get("priority", max(1, 10 - idx))),
+                    estimated_duration_seconds=float(s.get("estimated_duration_seconds", 15.0)),
+                    max_retries=int(s.get("max_retries", 2)),
+                    timeout_seconds=float(s.get("timeout_seconds", 180.0 if execution_mode in ("autonomous_desktop", "autonomous_browser") else 60.0)),
+                    requires_approval=requires_approval,
+                    approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
+                    metadata=metadata,
+                )
+                subtasks.append(subtask)
             
-            subtask = Subtask(
-                id=s.get("id", f"{task_id}-{len(subtasks)+1}"),
-                name=s.get("name", "Unnamed subtask"),
-                description=s.get("description", ""),
-                task_type=task_type,
-                assigned_agent=s.get("assigned_agent"),
-                assigned_tool=s.get("assigned_tool"),
-                dependencies=deps,
-                priority=int(s.get("priority", 5)),
-                estimated_duration_seconds=float(s.get("estimated_duration_seconds", 10.0)),
-                max_retries=int(s.get("max_retries", 2)),
-                timeout_seconds=float(s.get("timeout_seconds", 60.0)),
-                requires_approval=s.get("requires_approval", False),
-                approval_status=ApprovalStatus.PENDING if s.get("requires_approval", False) else ApprovalStatus.NOT_REQUIRED,
-                metadata={"arguments": self._generate_tool_arguments(s.get("assigned_tool"), None, original_request)},
-            )
-            subtasks.append(subtask)
-            
-            # Validate dependencies - create new Subtask objects with filtered dependencies
+            # Validate dependencies
             subtask_ids = {s.id for s in subtasks}
             validated_subtasks = []
             for subtask in subtasks:
-                filtered_deps = [d for d in subtask.dependencies if d in subtask_ids]
+                filtered_deps = [d for d in subtask.dependencies if d in subtask_ids and d != subtask.id]
                 if filtered_deps != subtask.dependencies:
-                    # Create new Subtask with filtered dependencies
-                    validated_subtasks.append(Subtask(
-                        id=subtask.id,
-                        name=subtask.name,
-                        description=subtask.description,
-                        task_type=subtask.task_type,
-                        assigned_agent=subtask.assigned_agent,
-                        assigned_tool=subtask.assigned_tool,
-                        dependencies=filtered_deps,
-                        priority=subtask.priority,
-                        estimated_duration_seconds=subtask.estimated_duration_seconds,
-                        max_retries=subtask.max_retries,
-                        timeout_seconds=subtask.timeout_seconds,
-                        requires_approval=subtask.requires_approval,
-                        approval_status=subtask.approval_status,
-                        metadata=subtask.metadata,
-                    ))
+                    validated_subtasks.append(msgspec.structs.replace(subtask, dependencies=filtered_deps))
                 else:
                     validated_subtasks.append(subtask)
             subtasks = validated_subtasks
@@ -433,171 +478,75 @@ Available Tools:
         analysis: TaskAnalysis,
         original_request: str,
     ) -> ExecutionPlan:
-        """Create fallback plan when LLM fails."""
-        subtasks = []
-        request_lower = original_request.lower()
+        """Create structured fallback plan without hardcoded app-specific scripts."""
+        subtasks: List[Subtask] = []
         
-        # Check if this is a Word document creation task
-        is_word_task = "word" in request_lower and ("create" in request_lower or "document" in request_lower or "write" in request_lower)
-        is_desktop_save = "desktop" in request_lower and "save" in request_lower
-        
-        # Create subtasks based on requirements with Word-specific logic
-        for i, req in enumerate(analysis.requirements[:8]):
-            tool_name = self._find_tool_for_capability(req.capability)
-            requires_approval = self._requires_approval(tool_name) if tool_name else False
-            
-            # Generate appropriate arguments for the tool
-            arguments = self._generate_tool_arguments(tool_name, req, original_request)
-            
-            # Special handling for Word document creation
-            if is_word_task and tool_name == "app_launch":
-                arguments = {"app_name": "word", "approved": True}
-            elif is_word_task and tool_name == "app_control" and "focus" not in arguments:
-                arguments = {"action": "focus", "process_name": "WINWORD.EXE", "approved": True}
-            elif is_word_task and tool_name == "keyboard_input" and "text" not in arguments:
-                # Will be handled by specific subtasks below
-                pass
-            elif is_word_task and tool_name == "mouse_control" and "action" not in arguments:
-                arguments = {"action": "move", "approved": True}
-                
-            subtask = Subtask(
-                id=f"{task_id}-{i+1}",
-                name=f"Execute {req.capability}",
-                description=req.description,
-                task_type=TaskType.TOOL_USE,
-                assigned_tool=tool_name,
-                priority=10 - i,
-                estimated_duration_seconds=20.0,
+        # If task requires multi-step UI or browser automation, plan cohesive autonomous execution
+        is_autonomous = bool(analysis.metadata.get("autonomous_execution")) or (
+            analysis.intent.primary in ("desktop_automation", "browser_automation", "automation")
+        )
+        if is_autonomous:
+            execution_mode = (
+                "autonomous_browser"
+                if analysis.intent.primary == "browser_automation"
+                else "autonomous_desktop"
+            )
+            requires_approval = analysis.requires_approval or any(
+                self._requires_approval(self._find_tool_for_capability(r.capability), original_request, analysis)
+                for r in analysis.requirements
+            )
+            subtasks.append(Subtask(
+                id=f"{task_id}-auto-1",
+                name="Execute autonomous workflow",
+                description=original_request or analysis.intent.primary,
+                task_type=TaskType.MULTI_STEP,
+                priority=10,
+                estimated_duration_seconds=max(30.0, analysis.estimated_duration_seconds),
+                max_retries=2,
+                timeout_seconds=300.0,
                 requires_approval=requires_approval,
                 approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
-                metadata={"arguments": arguments},
+                metadata={
+                    "execution_mode": execution_mode,
+                    "goal": original_request,
+                    "original_request": original_request,
+                    "requirements": [r.capability for r in analysis.requirements],
+                },
+            ))
+            return ExecutionPlan(
+                task_id=task_id,
+                original_request=original_request,
+                analysis=analysis,
+                subtasks=subtasks,
+                strategy=ExecutionStrategy.SEQUENTIAL,
+                max_concurrency=1,
+                total_estimated_duration=subtasks[0].estimated_duration_seconds,
+            )
+        
+        # Direct capability-based fallback for non-GUI multi-step or tool tasks
+        prev_id: Optional[str] = None
+        for i, req in enumerate(analysis.requirements[:8]):
+            tool_name = self._find_tool_for_capability(req.capability)
+            requires_approval = self._requires_approval(tool_name, f"{req.description} {original_request}", analysis)
+            arguments = self._generate_tool_arguments(tool_name, req, original_request)
+            subtask_id = f"{task_id}-{i+1}"
+            
+            subtask = Subtask(
+                id=subtask_id,
+                name=f"Execute {req.capability}",
+                description=req.description or original_request,
+                task_type=TaskType.TOOL_USE if tool_name else TaskType.SIMPLE,
+                assigned_tool=tool_name,
+                dependencies=[prev_id] if prev_id else [],
+                priority=10 - i,
+                estimated_duration_seconds=15.0,
+                requires_approval=requires_approval,
+                approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
+                metadata={"arguments": arguments} if arguments else {},
             )
             subtasks.append(subtask)
+            prev_id = subtask_id
         
-        # For Word document creation, add detailed subtasks if we have the right tools
-        if is_word_task:
-            # Replace generic subtasks with Word-specific ones
-            word_subtasks = [
-                Subtask(
-                    id=f"{task_id}-launch-word",
-                    name="Launch Microsoft Word",
-                    description="Launch Word application",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="app_launch",
-                    priority=10,
-                    estimated_duration_seconds=10.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    metadata={"arguments": {"app_name": "word", "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-focus-word",
-                    name="Focus Word window",
-                    description="Ensure Word window is focused and maximized",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="app_control",
-                    priority=9,
-                    estimated_duration_seconds=5.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-launch-word"],
-                    metadata={"arguments": {"action": "focus", "process_name": "WINWORD.EXE", "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-create-title",
-                    name="Create title page",
-                    description="Type title and format title page",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="keyboard_input",
-                    priority=8,
-                    estimated_duration_seconds=30.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-focus-word"],
-                    metadata={"arguments": {"action": "type", "text": "Greenhouse Effect\n\nA Comprehensive Project Report\n\nPrepared by M AI Assistant\n\nDate: " + datetime.now().strftime("%B %d, %Y"), "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-format-title",
-                    name="Format title page",
-                    description="Apply heading styles, center alignment, font sizes",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="keyboard_input",
-                    priority=7,
-                    estimated_duration_seconds=20.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-create-title"],
-                    metadata={"arguments": {"action": "hotkey", "keys": ["ctrl", "a"], "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-add-headings",
-                    name="Add document headings",
-                    description="Add structured headings for sections",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="keyboard_input",
-                    priority=6,
-                    estimated_duration_seconds=30.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-format-title"],
-                    metadata={"arguments": {"action": "type", "text": "\n\nTable of Contents\n\n1. Introduction\n2. The Greenhouse Effect Explained\n3. Causes of Enhanced Greenhouse Effect\n4. Consequences and Impacts\n5. Mitigation Strategies\n6. Conclusion\n7. References", "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-add-content",
-                    name="Add detailed content",
-                    description="Write detailed explanations for each section",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="keyboard_input",
-                    priority=5,
-                    estimated_duration_seconds=60.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-add-headings"],
-                    metadata={"arguments": {"action": "type", "text": "\n\n1. Introduction\n\nThe greenhouse effect is a natural process that warms the Earth's surface. When the Sun's energy reaches the Earth's atmosphere, some of it is reflected back to space and the rest is absorbed and re-radiated by greenhouse gases.\n\n2. The Greenhouse Effect Explained\n\nGreenhouse gases include water vapor, carbon dioxide, methane, nitrous oxide, and ozone. These gases absorb and re-emit infrared radiation, trapping heat in the atmosphere.\n\n3. Causes of Enhanced Greenhouse Effect\n\nHuman activities have significantly increased greenhouse gas concentrations:\n- Burning fossil fuels (coal, oil, natural gas)\n- Deforestation and land-use changes\n- Industrial processes\n- Agriculture (livestock, rice paddies)\n\n4. Consequences and Impacts\n\n- Rising global temperatures\n- Melting ice caps and glaciers\n- Sea level rise\n- Extreme weather events\n- Ocean acidification\n\n5. Mitigation Strategies\n\n- Transition to renewable energy\n- Energy efficiency improvements\n- Reforestation and afforestation\n- Carbon capture and storage\n- Policy measures (carbon pricing, regulations)\n\n6. Conclusion\n\nAddressing the enhanced greenhouse effect requires immediate global action. The science is clear: human activities are driving climate change, and we have the tools to mitigate its worst impacts.\n\n7. References\n\n- IPCC Assessment Reports\n- NASA Climate Data\n- NOAA Greenhouse Gas Index\n- Peer-reviewed climate science literature", "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-add-table",
-                    name="Add comparison table",
-                    description="Insert formatted table with greenhouse gas data",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="keyboard_input",
-                    priority=4,
-                    estimated_duration_seconds=30.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-add-content"],
-                    metadata={"arguments": {"action": "hotkey", "keys": ["alt", "n", "t"], "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-save-document",
-                    name="Save document to Desktop",
-                    description="Save as Greenhouse_Effect_Project.docx",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="keyboard_input",
-                    priority=3,
-                    estimated_duration_seconds=15.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-add-table"],
-                    metadata={"arguments": {"action": "hotkey", "keys": ["ctrl", "s"], "approved": True}},
-                ),
-                Subtask(
-                    id=f"{task_id}-close-word",
-                    name="Close Microsoft Word",
-                    description="Close Word application",
-                    task_type=TaskType.TOOL_USE,
-                    assigned_tool="app_control",
-                    priority=2,
-                    estimated_duration_seconds=5.0,
-                    requires_approval=True,
-                    approval_status=ApprovalStatus.PENDING,
-                    dependencies=[f"{task_id}-save-document"],
-                    metadata={"arguments": {"action": "close", "process_name": "WINWORD.EXE", "approved": True}},
-                ),
-            ]
-            subtasks = word_subtasks
-        
-        # Add synthesis if multiple
         if len(subtasks) > 1:
             synthesis = Subtask(
                 id=f"{task_id}-synthesis",
@@ -610,15 +559,17 @@ Available Tools:
             )
             subtasks.append(synthesis)
         
-        # If no subtasks created, add default
         if not subtasks:
+            requires_approval = self._requires_approval(None, original_request, analysis)
             subtasks.append(Subtask(
                 id=f"{task_id}-1",
                 name="Process request",
-                description="Process the user request",
+                description=original_request or "Process the user request",
                 task_type=TaskType.SIMPLE,
                 priority=10,
                 estimated_duration_seconds=5.0,
+                requires_approval=requires_approval,
+                approval_status=ApprovalStatus.PENDING if requires_approval else ApprovalStatus.NOT_REQUIRED,
             ))
         
         total_duration = sum(s.estimated_duration_seconds for s in subtasks)
@@ -633,108 +584,117 @@ Available Tools:
             total_estimated_duration=total_duration,
         )
     
+    def _extract_app_name(self, text: str) -> Optional[str]:
+        """Extract concrete application name from request text."""
+        text_lower = text.lower()
+        app_keywords = {
+            "microsoft word": "winword",
+            "ms word": "winword",
+            "word": "winword",
+            "microsoft excel": "excel",
+            "excel": "excel",
+            "powerpoint": "powerpnt",
+            "notepad++": "notepad++",
+            "notepad": "notepad",
+            "calculator": "calc",
+            "calc": "calc",
+            "file explorer": "explorer",
+            "explorer": "explorer",
+            "powershell": "powershell",
+            "windows terminal": "wt",
+            "terminal": "wt",
+            "cmd": "cmd",
+            "google chrome": "chrome",
+            "chrome": "chrome",
+            "microsoft edge": "msedge",
+            "edge": "msedge",
+            "firefox": "firefox",
+            "vs code": "code",
+            "vscode": "code",
+            "paint": "mspaint",
+            "settings": "ms-settings:",
+            "task manager": "taskmgr",
+            "outlook": "outlook",
+        }
+        for kw, app in app_keywords.items():
+            if re.search(rf"\b{re.escape(kw)}\b", text_lower):
+                return app
+        m = re.search(r"\b(?:launch|open|start)\s+([a-zA-Z0-9_.\-]{2,40})", text_lower)
+        if m:
+            candidate = m.group(1)
+            if candidate not in {"a", "an", "the", "file", "folder", "website", "url", "page"}:
+                return candidate
+        return None
+    
+    def _extract_path_arg(self, text: str) -> Optional[str]:
+        """Extract a Windows/relative path from request text if explicitly mentioned."""
+        m = re.search(r'([A-Za-z]:\\[^\s"\'<>|]+|"[^"]+"|\'[^\']+\')', text)
+        if m:
+            return m.group(1).strip('"\'')
+        return None
+    
     def _generate_tool_arguments(self, tool_name: Optional[str], req: Optional["TaskRequirement"], original_request: str) -> Dict[str, Any]:
-        """Generate appropriate arguments for a tool based on the request."""
+        """Generate concrete non-fabricated arguments for a tool based on the request."""
         if not tool_name:
             return {}
         
-        request_lower = original_request.lower()
+        combined = f"{req.description if req else ''} {original_request}".strip()
+        combined_lower = combined.lower()
         
-        # Tool-specific argument generation
         if tool_name == "app_launch":
-            # Try to extract app name from request
-            app_keywords = {
-                "notepad": "notepad",
-                "calculator": "calc",
-                "calc": "calc",
-                "explorer": "explorer",
-                "cmd": "cmd",
-                "powershell": "powershell",
-                "terminal": "wt",
-                "chrome": "chrome",
-                "firefox": "firefox",
-                "edge": "msedge",
-                "vscode": "code",
-                "code": "code",
-            }
-            app_name = "notepad"  # default
-            for kw, app in app_keywords.items():
-                if kw in original_request.lower():
-                    app_name = app
-                    break
-            return {"app_name": app_name}
+            app_name = self._extract_app_name(combined)
+            return {"app_name": app_name} if app_name else {}
         
-        elif tool_name == "app_control":
-            # Determine action based on request
-            request_lower = original_request.lower()
-            if any(word in request_lower for word in ["close", "exit", "quit", "kill"]):
-                return {"action": "close"}
-            elif any(word in request_lower for word in ["focus", "activate", "bring to front"]):
-                return {"action": "focus"}
-            elif any(word in request_lower for word in ["minimize", "minimise"]):
-                return {"action": "minimize"}
-            elif any(word in request_lower for word in ["maximize", "maximise"]):
-                return {"action": "maximize"}
-            elif any(word in request_lower for word in ["restore"]):
-                return {"action": "restore"}
-            else:
-                return {"action": "list"}
+        if tool_name == "app_control":
+            app_name = self._extract_app_name(combined)
+            action = "list"
+            if any(word in combined_lower for word in ["close", "exit", "quit", "kill"]):
+                action = "close"
+            elif any(word in combined_lower for word in ["focus", "activate", "bring to front", "switch to"]):
+                action = "focus"
+            elif any(word in combined_lower for word in ["minimize", "minimise"]):
+                action = "minimize"
+            elif any(word in combined_lower for word in ["maximize", "maximise"]):
+                action = "maximize"
+            elif "restore" in combined_lower:
+                action = "restore"
+            args: Dict[str, Any] = {"action": action}
+            if app_name and action != "list":
+                args["window_title"] = app_name
+            return args
         
-        elif tool_name == "powershell":
-            return {"command": "Get-Date"}
-        
-        elif tool_name == "system_command":
-            return {"command": "echo", "arguments": "Hello from M"}
-        
-        elif tool_name == "process_list":
+        if tool_name == "process_list":
             return {"limit": 20, "sort_by": "cpu"}
         
-        elif tool_name == "window_list":
+        if tool_name == "window_list":
             return {"limit": 20}
         
-        elif tool_name == "shortcut_create":
-            return {
-                "target_path": "C:\\Windows\\notepad.exe",
-                "shortcut_path": "C:\\Temp\\notepad.lnk",
-            }
-        
-        elif tool_name == "system_info":
+        if tool_name == "system_info":
             return {"include_cpu": True, "include_memory": True, "include_disk": True}
         
-        elif tool_name == "file_read":
-            return {"path": "."}
+        if tool_name in ("file_read", "file_list", "file_delete"):
+            path = self._extract_path_arg(original_request)
+            if path:
+                return {"path": path}
+            return {}
         
-        elif tool_name == "file_list":
-            return {"path": ".", "recursive": False}
+        if tool_name == "file_search":
+            path = self._extract_path_arg(original_request)
+            return {"path": path, "pattern": "*"} if path else {}
         
-        elif tool_name == "file_search":
-            return {"path": ".", "pattern": "*"}
-        
-        elif tool_name == "web_search":
+        if tool_name == "web_search":
             return {"query": original_request, "max_results": 10}
         
-        elif tool_name == "memory_read":
-            return {"entry_id": "latest"}
-        
-        elif tool_name == "memory_search":
+        if tool_name == "memory_search":
             return {"query": original_request, "limit": 10}
         
-        elif tool_name == "screen_capture":
+        if tool_name == "screen_capture":
             return {"mode": "full", "output_format": "png"}
         
-        elif tool_name == "screen_ocr":
+        if tool_name == "screen_ocr":
             return {"source": "screen", "language": "eng"}
         
-        elif tool_name == "visual_find":
-            return {"method": "text", "search_text": "the"}
-        
-        elif tool_name == "visual_verify":
-            return {"check_type": "text_present", "search_text": "Windows"}
-        
-        elif tool_name == "window_interact":
-            return {"action": "list"}
-        
-        # Default empty arguments
+        # Dynamic GUI/admin tools must not invent bogus defaults upfront
         return {}
     
     def _find_tool_for_capability(self, capability: str) -> Optional[str]:
@@ -749,6 +709,7 @@ Available Tools:
             "file:search": "file_search",
             "file:delete": "file_delete",
             "system:info": "system_info",
+            "system:admin": "powershell",
             "memory:read": "memory_read",
             "memory:search": "memory_search",
             "app:launch": "app_launch",
@@ -764,12 +725,26 @@ Available Tools:
         }
         return capability_to_tool.get(capability)
     
-    def _requires_approval(self, tool_name: Optional[str]) -> bool:
-        """Check if tool requires approval."""
-        if not tool_name:
-            return False
-        high_risk_tools = {"file_delete", "file_write", "system_admin", "web_automate", "app_control", "app_launch"}
-        return tool_name in high_risk_tools
+    def _requires_approval(
+        self,
+        tool_name: Optional[str],
+        text: str = "",
+        analysis: Optional[TaskAnalysis] = None,
+    ) -> bool:
+        """Check if tool or request requires explicit user approval."""
+        high_risk_tools = {
+            "file_delete", "file_write", "system_admin", "powershell",
+            "system_command", "web_automate", "app_control", "app_launch",
+            "shortcut_create", "mouse_control", "keyboard_input", "window_interact",
+        }
+        if tool_name and tool_name in high_risk_tools:
+            return True
+        if analysis and analysis.requires_approval and tool_name not in ("system_info", "process_list", "window_list", "screen_capture", "screen_ocr"):
+            return True
+        text_lower = text.lower()
+        if any(kw in text_lower for kw in ["delete", "wipe", "format", "powershell", "regedit", "shutdown"]):
+            return True
+        return False
     
     def _has_cycles(self, subtasks: List[Subtask]) -> bool:
         """Check if subtask dependencies have cycles."""
@@ -812,18 +787,23 @@ Available Tools:
         # Find edges that cause cycles
         bad_edges = set()
         for node in graph:
-            for dep in graph[node]:
+            for dep in list(graph[node]):
                 # Temporarily remove edge and check
                 graph[node].remove(dep)
                 if not visit(node, set(), set()):
                     bad_edges.add((node, dep))
                 graph[node].add(dep)
         
-        # Remove bad edges
+        # Remove bad edges cleanly on frozen Subtask instances
+        cleaned: List[Subtask] = []
         for subtask in subtasks:
-            subtask.dependencies = [d for d in subtask.dependencies if (subtask.id, d) not in bad_edges]
+            new_deps = [d for d in subtask.dependencies if (subtask.id, d) not in bad_edges]
+            if new_deps != subtask.dependencies:
+                cleaned.append(msgspec.structs.replace(subtask, dependencies=new_deps))
+            else:
+                cleaned.append(subtask)
         
-        return subtasks
+        return cleaned
     
     async def replan(
         self,
@@ -833,24 +813,28 @@ Available Tools:
         new_info: Optional[str] = None,
     ) -> ExecutionPlan:
         """Create a revised plan based on execution results."""
-        # Filter out completed subtasks
-        remaining_subtasks = [
+        filtered_subtasks = [
             s for s in original_plan.subtasks
             if s.id not in completed_subtasks and s.id not in failed_subtasks
         ]
         
-        # Reset dependencies to only include remaining subtasks
-        remaining_ids = {s.id for s in remaining_subtasks}
-        for s in remaining_subtasks:
-            s.dependencies = [d for d in s.dependencies if d in remaining_ids]
+        remaining_ids = {s.id for s in filtered_subtasks}
+        remaining_subtasks: List[Subtask] = []
+        for s in filtered_subtasks:
+            new_deps = [d for d in s.dependencies if d in remaining_ids]
+            if new_deps != s.dependencies:
+                remaining_subtasks.append(msgspec.structs.replace(s, dependencies=new_deps))
+            else:
+                remaining_subtasks.append(s)
         
-        # If there are failed subtasks, we might need to add recovery steps
         if failed_subtasks:
             for failed_id in failed_subtasks:
-                # Find the failed subtask
                 failed = next((s for s in original_plan.subtasks if s.id == failed_id), None)
                 if failed and failed.max_retries > 0:
-                    # Create retry subtask
+                    retry_deps = [d for d in failed.dependencies if d in remaining_ids]
+                    retry_meta = dict(failed.metadata)
+                    if new_info:
+                        retry_meta["recovery_hint"] = new_info
                     retry = Subtask(
                         id=f"{failed_id}-retry",
                         name=f"Retry: {failed.name}",
@@ -858,13 +842,16 @@ Available Tools:
                         task_type=failed.task_type,
                         assigned_agent=failed.assigned_agent,
                         assigned_tool=failed.assigned_tool,
-                        dependencies=failed.dependencies,
-                        priority=failed.priority + 100,  # High priority for retry
+                        dependencies=retry_deps,
+                        priority=failed.priority + 100,
                         estimated_duration_seconds=failed.estimated_duration_seconds * 1.5,
                         max_retries=failed.max_retries - 1,
                         timeout_seconds=failed.timeout_seconds,
                         requires_approval=failed.requires_approval,
-                        approval_status=ApprovalStatus.PENDING if failed.requires_approval else ApprovalStatus.NOT_REQUIRED,
+                        approval_status=failed.approval_status if failed.approval_status == ApprovalStatus.GRANTED else (
+                            ApprovalStatus.PENDING if failed.requires_approval else ApprovalStatus.NOT_REQUIRED
+                        ),
+                        metadata=retry_meta,
                     )
                     remaining_subtasks.append(retry)
         
@@ -878,7 +865,11 @@ Available Tools:
             strategy=original_plan.strategy,
             max_concurrency=original_plan.max_concurrency,
             total_estimated_duration=sum(s.estimated_duration_seconds for s in remaining_subtasks),
-            metadata={"replanned_from": original_plan.task_id, "new_info": new_info},
+            metadata={
+                **original_plan.metadata,
+                "replanned_from": original_plan.task_id,
+                "new_info": new_info,
+            },
         )
 
 

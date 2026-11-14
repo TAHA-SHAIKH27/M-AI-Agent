@@ -1,5 +1,6 @@
 """Task Understanding Engine for M AI Assistant."""
 import asyncio
+import re
 import uuid
 import structlog
 from typing import Optional, List, Dict, Any
@@ -134,9 +135,29 @@ class TaskUnderstandingEngine:
                 estimated_duration_seconds=1.0,
             )
         
+        # Never fast-path multi-step, UI automation, or destructive requests
+        has_multi_or_ui = (
+            any(conj in request_lower for conj in [" and ", " then ", ", ", "; ", " after ", " into "])
+            or any(
+                kw in request_lower
+                for kw in [
+                    "click", "double click", "right click", "type ", "press ",
+                    "button", "menu", "dialog", "dropdown", "scroll", "drag", "hover",
+                    "screenshot", "screen ", "window ", "form", "browser", "website",
+                    "delete", "remove", "erase", "wipe", "format", "powershell",
+                    "registry", "regedit", "shutdown", "restart",
+                ]
+            )
+        )
+        
         # Simple factual questions
         question_starters = ["what is ", "who is ", "when is ", "where is ", "how many ", "define ", "meaning of "]
-        if any(request_lower.startswith(q) for q in question_starters) and "?" in request and len(request) < 200:
+        if (
+            not has_multi_or_ui
+            and any(request_lower.startswith(q) for q in question_starters)
+            and "?" in request
+            and len(request) < 200
+        ):
             return TaskAnalysis(
                 intent=TaskIntent(primary="question_answering", confidence=0.9),
                 task_type=TaskType.SIMPLE,
@@ -147,8 +168,12 @@ class TaskUnderstandingEngine:
             )
         
         # Simple web search
-        search_patterns = ["search for ", "look up ", "find ", "google "]
-        if any(request_lower.startswith(p) for p in search_patterns) and len(request) < 200:
+        search_patterns = ["search for ", "look up ", "google "]
+        if (
+            not has_multi_or_ui
+            and any(request_lower.startswith(p) for p in search_patterns)
+            and len(request) < 200
+        ):
             return TaskAnalysis(
                 intent=TaskIntent(primary="information_retrieval", confidence=0.85),
                 task_type=TaskType.TOOL_USE,
@@ -162,8 +187,12 @@ class TaskUnderstandingEngine:
             )
         
         # File operations
-        file_patterns = ["read file ", "open file ", "show file ", "cat ", "list files ", "ls ", "find file "]
-        if any(request_lower.startswith(p) for p in file_patterns) and len(request) < 200:
+        file_patterns = ["read file ", "show file ", "cat ", "list files ", "ls ", "find file "]
+        if (
+            not has_multi_or_ui
+            and any(request_lower.startswith(p) for p in file_patterns)
+            and len(request) < 200
+        ):
             return TaskAnalysis(
                 intent=TaskIntent(primary="file_operation", confidence=0.85),
                 task_type=TaskType.TOOL_USE,
@@ -178,7 +207,11 @@ class TaskUnderstandingEngine:
         
         # System info
         sys_patterns = ["system info", "system status", "cpu usage", "memory usage", "disk usage", "whoami", "hostname"]
-        if any(p in request_lower for p in sys_patterns) and len(request) < 100:
+        if (
+            not has_multi_or_ui
+            and any(p in request_lower for p in sys_patterns)
+            and len(request) < 100
+        ):
             return TaskAnalysis(
                 intent=TaskIntent(primary="system_control", confidence=0.9),
                 task_type=TaskType.TOOL_USE,
@@ -191,15 +224,14 @@ class TaskUnderstandingEngine:
                 estimated_duration_seconds=2.0,
             )
         
-        # App launch/close - but only for simple single-action requests
-        # Multi-part requests (e.g., "open notepad and take screenshot") should use LLM analysis
+        # App launch/close - only for simple single-action requests
         simple_launch_patterns = ["launch ", "open ", "start ", "run "]
         simple_close_patterns = ["close ", "exit ", "quit "]
         
-        # Check if request appears to be a simple single-action request
         is_simple_request = (
-            len(request.split()) < 10 and  # Short request
-            not any(conj in request_lower for conj in [" and ", " then ", ", ", "; "])  # No conjunctions
+            len(request.split()) <= 4
+            and not has_multi_or_ui
+            and not any(w in request_lower for w in ["file", "document", "report", "folder", "url", "http"])
         )
         
         if is_simple_request and any(request_lower.startswith(p) for p in simple_launch_patterns) and len(request) < 200:
@@ -341,7 +373,7 @@ class TaskUnderstandingEngine:
             }
             complexity = complexity_map.get(data.get("complexity", "trivial"), TaskComplexity.TRIVIAL)
             
-            return TaskAnalysis(
+            analysis = TaskAnalysis(
                 intent=intent,
                 entities=entities,
                 requirements=requirements,
@@ -354,70 +386,171 @@ class TaskUnderstandingEngine:
                 risk_level=data.get("risk_level", "low"),
                 requires_approval=data.get("requires_approval", False),
             )
+            return self._finalize_analysis(analysis, original_request)
             
         except Exception as e:
             logger.warning(f"Failed to parse analysis response: {e}")
             return self._fallback_analysis(original_request)
     
+    def _finalize_analysis(self, analysis: TaskAnalysis, original_request: str) -> TaskAnalysis:
+        """Enforce deterministic security floors and autonomous execution metadata."""
+        request_lower = original_request.lower()
+        requirements = list(analysis.requirements)
+        cap_set = {r.capability for r in requirements}
+
+        is_destructive = bool(
+            re.search(r"\b(delete|erase|wipe|shred|rm\s+-rf|del\s+/|rmdir)\b", request_lower)
+            or re.search(r"\bformat\s+(drive|[a-z]:)", request_lower)
+            or any(kw in request_lower for kw in ["registry", "regedit", "shutdown", "restart system"])
+        )
+        is_admin = any(kw in request_lower for kw in ["powershell", "cmd.exe", "command prompt", "admin", "sudo"])
+
+        if is_destructive and "file:delete" not in cap_set:
+            requirements.append(TaskRequirement(capability="file:delete", description="Delete or wipe files", required=True))
+            cap_set.add("file:delete")
+        if is_admin and "system:admin" not in cap_set:
+            requirements.append(TaskRequirement(capability="system:admin", description="Execute administrative command", required=True))
+            cap_set.add("system:admin")
+
+        high_risk_caps = {"app:launch", "app:control", "file:delete", "file:write", "system:admin", "web:automate"}
+        requires_approval = (
+            analysis.requires_approval
+            or is_destructive
+            or is_admin
+            or bool(cap_set & high_risk_caps)
+        )
+        risk_level = analysis.risk_level
+        if is_destructive or "file:delete" in cap_set:
+            risk_level = "critical" if ("c:\\" in request_lower or "all files" in request_lower or "system" in request_lower) else "high"
+        elif requires_approval and risk_level == "low":
+            risk_level = "high"
+
+        ui_indicators = [
+            "click", "double click", "right click", "type ", "press ", "hotkey",
+            "button", "menu", "dialog", "dropdown", "scroll", "drag", "hover",
+            "screenshot", "ocr", "window", "form", "desktop", "browser", "website",
+            "word", "excel", "notepad", "powerpoint", "paint", "chrome", "edge", "firefox",
+        ]
+        autonomous_caps = {
+            "automation:input", "automation:mouse", "automation:window",
+            "screen:find", "screen:verify", "screen:analyze", "web:automate",
+        }
+        multi_action = any(conj in request_lower for conj in [" and ", " then ", "; "]) and analysis.task_type in (
+            TaskType.MULTI_STEP, TaskType.COMPLEX, TaskType.TOOL_USE
+        )
+        autonomous_execution = (
+            analysis.intent.primary in ("desktop_automation", "browser_automation", "automation")
+            or bool(cap_set & autonomous_caps)
+            or (multi_action and any(kw in request_lower for kw in ui_indicators))
+            or (any(kw in request_lower for kw in ["click", "type ", "fill ", "select ", "dropdown", "dialog", "drag", "scroll"]))
+        )
+
+        # Avoid setting autonomous_execution on pure file/shell destruction commands so approval gates stay clean
+        if is_destructive and not any(kw in request_lower for kw in ["click", "window", "browser", "app", "button"]):
+            autonomous_execution = False
+
+        needs_tools = analysis.needs_tools or bool(requirements) or autonomous_execution
+        task_type = analysis.task_type
+        if autonomous_execution and task_type in (TaskType.SIMPLE, TaskType.TOOL_USE) and len(requirements) > 1:
+            task_type = TaskType.MULTI_STEP
+
+        return TaskAnalysis(
+            intent=analysis.intent,
+            entities=analysis.entities,
+            requirements=requirements,
+            task_type=task_type,
+            complexity=analysis.complexity,
+            needs_memory=analysis.needs_memory,
+            needs_tools=needs_tools,
+            estimated_subtasks=max(1, analysis.estimated_subtasks),
+            estimated_duration_seconds=analysis.estimated_duration_seconds,
+            risk_level=risk_level,
+            requires_approval=requires_approval,
+            metadata={
+                **(analysis.metadata or {}),
+                "autonomous_execution": autonomous_execution,
+                "is_destructive": is_destructive,
+            },
+        )
+
     def _fallback_analysis(self, request: str) -> TaskAnalysis:
         """Fallback analysis when LLM fails."""
-        # Heuristic analysis based on request length and keywords
         request_lower = request.lower()
         word_count = len(request.split())
         
-        # Determine if tools needed
-        tool_keywords = ["search", "find", "read", "write", "list", "delete", "create", "run", "execute", "launch", "open", "close", "get", "set", "install", "update", "remove", "screenshot", "capture"]
+        tool_keywords = [
+            "search", "find", "read", "write", "list", "delete", "remove", "wipe",
+            "erase", "format", "create", "run", "execute", "launch", "open", "close",
+            "get", "set", "install", "update", "screenshot", "capture", "click",
+            "type", "press", "scroll", "drag", "navigate", "fill", "save",
+        ]
         needs_tools = any(kw in request_lower for kw in tool_keywords)
         
-        # Determine if memory needed
         memory_keywords = ["remember", "recall", "previous", "earlier", "last time", "before", "history", "context"]
         needs_memory = any(kw in request_lower for kw in memory_keywords)
         
-        # Detect capabilities from request
-        requirements = []
+        requirements: List[TaskRequirement] = []
+        seen_caps: set[str] = set()
+
+        def add_req(cap: str, desc: str) -> None:
+            if cap not in seen_caps:
+                seen_caps.add(cap)
+                requirements.append(TaskRequirement(capability=cap, description=desc, required=True))
+
         if any(w in request_lower for w in ["launch", "open", "start"]):
-            requirements.append(TaskRequirement(capability="app:launch", description="Launch application", required=True))
-        if any(w in request_lower for w in ["close", "exit", "quit"]):
-            requirements.append(TaskRequirement(capability="app:control", description="Close or control application", required=True))
+            add_req("app:launch", "Launch application")
+        if any(w in request_lower for w in ["close", "exit", "quit", "focus", "minimize", "maximize"]):
+            add_req("app:control", "Control application")
         if any(w in request_lower for w in ["screenshot", "capture screen", "take a screenshot"]):
-            requirements.append(TaskRequirement(capability="screen:capture", description="Capture screen", required=True))
+            add_req("screen:capture", "Capture screen")
         if any(w in request_lower for w in ["ocr", "read screen", "recognize text"]):
-            requirements.append(TaskRequirement(capability="screen:ocr", description="Screen OCR", required=True))
-        if any(w in request_lower for w in ["type", "press key", "keyboard"]):
-            requirements.append(TaskRequirement(capability="automation:input", description="Keyboard input", required=True))
-        if any(w in request_lower for w in ["system info", "cpu usage", "memory usage"]):
-            requirements.append(TaskRequirement(capability="system:info", description="Get system info", required=True))
-        if any(w in request_lower for w in ["read file", "open file", "cat "]):
-            requirements.append(TaskRequirement(capability="file:read", description="Read file", required=True))
-        if any(w in request_lower for w in ["write file", "save file", "create file"]):
-            requirements.append(TaskRequirement(capability="file:write", description="Write file", required=True))
-        if any(w in request_lower for w in ["search", "look up", "google"]):
-            requirements.append(TaskRequirement(capability="web:search", description="Search the web", required=True))
-        if any(w in request_lower for w in ["click", "press", "mouse"]):
-            requirements.append(TaskRequirement(capability="automation:mouse", description="Mouse control", required=True))
-        if any(w in request_lower for w in ["screenshot", "capture screen", "take a screenshot"]):
-            requirements.append(TaskRequirement(capability="screen:capture", description="Capture screen", required=True))
-        if any(w in request_lower for w in ["ocr", "read screen", "recognize text"]):
-            requirements.append(TaskRequirement(capability="screen:ocr", description="Screen OCR", required=True))
+            add_req("screen:ocr", "Screen OCR")
         if any(w in request_lower for w in ["analyze screen", "understand screen", "what's on screen"]):
-            requirements.append(TaskRequirement(capability="screen:analyze", description="Analyze screen", required=True))
+            add_req("screen:analyze", "Analyze screen")
+        if any(w in request_lower for w in ["find button", "find text", "locate", "on screen"]):
+            add_req("screen:find", "Find visual element")
+        if any(w in request_lower for w in ["verify", "confirm", "check if visible"]):
+            add_req("screen:verify", "Verify screen state")
+        if any(w in request_lower for w in ["type", "press key", "hotkey", "keyboard", "write"]):
+            add_req("automation:input", "Keyboard input")
+        if any(w in request_lower for w in ["click", "double click", "right click", "mouse", "drag", "scroll", "hover"]):
+            add_req("automation:mouse", "Mouse control")
+        if any(w in request_lower for w in ["dialog", "menu", "dropdown", "fill form", "form fill"]):
+            add_req("automation:window", "Window UI control")
+        if any(w in request_lower for w in ["system info", "cpu usage", "memory usage"]):
+            add_req("system:info", "Get system info")
+        if any(w in request_lower for w in ["powershell", "cmd", "command prompt", "registry", "regedit", "shutdown"]):
+            add_req("system:admin", "Administrative command")
+        if any(w in request_lower for w in ["read file", "open file", "cat "]):
+            add_req("file:read", "Read file")
+        if any(w in request_lower for w in ["write file", "save file", "create file", "save as", "document"]):
+            add_req("file:write", "Write or save file")
+        if re.search(r"\b(delete|erase|wipe|shred|rm\s+-rf|del\s+/)\b", request_lower) or "remove file" in request_lower:
+            add_req("file:delete", "Delete files")
+        if any(w in request_lower for w in ["search", "look up", "google"]):
+            add_req("web:search", "Search the web")
         if any(w in request_lower for w in ["browser", "website", "web page", "chrome", "edge", "firefox"]):
-            requirements.append(TaskRequirement(capability="web:automate", description="Browser automation", required=True))
-        if any(w in request_lower for w in ["navigate", "go to", "visit"]):
-            requirements.append(TaskRequirement(capability="web:browse", description="Web browsing", required=True))
-        if any(w in request_lower for w in ["fill form", "form fill", "type in"]):
-            requirements.append(TaskRequirement(capability="automation:input", description="Form filling", required=True))
-        
-        # Determine complexity
-        if len(requirements) > 1:
-            complexity = TaskComplexity.MEDIUM
+            add_req("web:automate", "Browser automation")
+        if any(w in request_lower for w in ["navigate", "go to", "visit", "http://", "https://"]):
+            add_req("web:browse", "Web browsing")
+
+        is_browser = "web:automate" in seen_caps or "web:browse" in seen_caps
+        is_desktop_ui = bool(
+            seen_caps & {
+                "automation:input", "automation:mouse", "automation:window",
+                "screen:find", "screen:verify", "screen:analyze",
+            }
+        ) or ("app:launch" in seen_caps and (len(seen_caps) > 1 or any(c in request_lower for c in [" and ", " then ", "document", "report"])))
+
+        if len(requirements) > 1 or is_desktop_ui or is_browser:
+            complexity = TaskComplexity.MEDIUM if len(requirements) < 4 else TaskComplexity.HIGH
             task_type = TaskType.MULTI_STEP
-            estimated_subtasks = len(requirements)
+            estimated_subtasks = max(2, len(requirements))
         elif word_count < 20 and not needs_tools:
             complexity = TaskComplexity.TRIVIAL
             task_type = TaskType.SIMPLE
             estimated_subtasks = 1
-        elif word_count < 50 and needs_tools:
+        elif word_count < 50 and (needs_tools or requirements):
             complexity = TaskComplexity.LOW
             task_type = TaskType.TOOL_USE
             estimated_subtasks = max(1, len(requirements))
@@ -429,19 +562,29 @@ class TaskUnderstandingEngine:
             complexity = TaskComplexity.HIGH
             task_type = TaskType.COMPLEX
             estimated_subtasks = max(5, len(requirements))
-        
-        return TaskAnalysis(
-            intent=TaskIntent(primary="task_orchestration" if len(requirements) > 1 else "other", confidence=0.7),
+
+        if is_browser and not is_desktop_ui:
+            primary_intent = "browser_automation"
+        elif is_desktop_ui:
+            primary_intent = "desktop_automation"
+        elif len(requirements) > 1:
+            primary_intent = "task_orchestration"
+        else:
+            primary_intent = "other"
+
+        analysis = TaskAnalysis(
+            intent=TaskIntent(primary=primary_intent, confidence=0.7),
             task_type=task_type,
             complexity=complexity,
             needs_memory=needs_memory,
-            needs_tools=needs_tools,
+            needs_tools=needs_tools or bool(requirements),
             requirements=requirements,
             estimated_subtasks=estimated_subtasks,
             estimated_duration_seconds=estimated_subtasks * 5.0,
-            risk_level="high" if any(r.capability in ["app:launch", "app:control", "file:delete"] for r in requirements) else "low",
-            requires_approval=any(r.capability in ["app:launch", "app:control", "file:delete"] for r in requirements),
+            risk_level="high" if seen_caps & {"app:launch", "app:control", "file:delete", "system:admin", "file:write"} else "low",
+            requires_approval=bool(seen_caps & {"app:launch", "app:control", "file:delete", "system:admin", "file:write", "web:automate"}),
         )
+        return self._finalize_analysis(analysis, request)
 
 
 # Global task understanding engine instance

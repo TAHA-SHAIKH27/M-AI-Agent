@@ -198,10 +198,14 @@ class ToolRegistry(Registry):
     ) -> Any:
         """Convenience method to invoke a tool."""
         from m_core.common_schemas import ToolInvocation
-        
+
+        final_args = dict(arguments or {})
+        if approval_token and "approval_token" not in final_args:
+            final_args["approval_token"] = approval_token
+
         invocation = ToolInvocation(
             tool_name=tool_name,
-            arguments=arguments,
+            arguments=final_args,
             correlation_id=correlation_id,
             timeout_seconds=timeout_seconds,
         )

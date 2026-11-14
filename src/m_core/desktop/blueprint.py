@@ -73,11 +73,20 @@ class BlueprintElement:
     verified: bool = False  # Whether verified in recent interaction
     
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        if hasattr(self.element_type, "value"):
+            d["element_type"] = self.element_type.value
+        return d
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BlueprintElement":
-        return cls(**data)
+        data_copy = dict(data)
+        if "element_type" in data_copy and isinstance(data_copy["element_type"], str):
+            try:
+                data_copy["element_type"] = ElementType(data_copy["element_type"])
+            except ValueError:
+                data_copy["element_type"] = ElementType.UNKNOWN
+        return cls(**data_copy)
 
 
 @dataclass
@@ -167,7 +176,10 @@ class BlueprintStore:
     """Persistent storage for blueprints."""
     
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or Path("data/blueprints.db")
+        if db_path is None:
+            from m_core.config import settings
+            db_path = settings.data_dir / "blueprints.db"
+        self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
@@ -258,7 +270,7 @@ class BlueprintStore:
         cursor = conn.cursor()
         
         blueprint.updated_at = int(time.time())
-        data = json.dumps(blueprint.to_dict())
+        serialized = json.dumps(blueprint.to_dict())
         
         cursor.execute("""
             INSERT OR REPLACE INTO blueprints
@@ -271,8 +283,8 @@ class BlueprintStore:
             blueprint.process_name,
             blueprint.window_class,
             blueprint.version,
-            blueprint.status.value,
-            json.dumps(blueprint.to_dict()),
+            blueprint.status.value if hasattr(blueprint.status, "value") else str(blueprint.status),
+            serialized,
             blueprint.created_at,
             blueprint.updated_at,
             blueprint.last_verified,
@@ -289,7 +301,7 @@ class BlueprintStore:
             """, (
                 elem.element_id,
                 blueprint.blueprint_id,
-                elem.element_type.value,
+                elem.element_type.value if hasattr(elem.element_type, "value") else str(elem.element_type),
                 elem.name,
                 json.dumps(elem.selectors),
                 json.dumps(elem.bbox) if elem.bbox else None,
@@ -518,8 +530,8 @@ class BlueprintManager:
         # Check if application is running and window matches
         try:
             from m_core.tools import tool_registry
-            from m_core.tools.schemas import ToolExecutionContext
-            from m_core.security import consent_manager, ConsentScope
+            from m_core.common_schemas import ToolExecutionContext
+            from m_core.security import consent_manager
             
             tool = tool_registry.get_tool('window_list')
             ctx = ToolExecutionContext(
@@ -532,14 +544,16 @@ class BlueprintManager:
             )
             result = await tool.execute(ctx)
             
-            if not result.success or not result.result.get('windows'):
+            if not result.success or not (result.result or {}).get('windows'):
                 return False
             
             # Check if any window matches our patterns
             for window in result.result['windows']:
                 if window.get('is_visible'):
+                    if not blueprint.window_patterns:
+                        return True
                     for pattern in blueprint.window_patterns:
-                        if pattern.get('title_pattern', '').lower() in window['title'].lower():
+                        if pattern.get('title_pattern', '').lower() in (window.get('title') or '').lower():
                             return True
             
             return False
@@ -557,10 +571,15 @@ class BlueprintManager:
     ) -> None:
         """Learn from a successful or failed interaction."""
         try:
+            if not success:
+                blueprint.failure_count += 1
+                self._save_blueprint_changes(blueprint)
+                return
+
             # Find the element in the window
             from m_core.tools import tool_registry
-            from m_core.tools.schemas import ToolExecutionContext
-            from m_core.security import consent_manager, ConsentScope
+            from m_core.common_schemas import ToolExecutionContext
+            from m_core.security import consent_manager
             
             tool = tool_registry.get_tool('window_interact')
             ctx = ToolExecutionContext(
@@ -578,13 +597,15 @@ class BlueprintManager:
             )
             result = await tool.execute(ctx)
             
-            if result.success and result.result.get('control'):
+            if result.success and (result.result or {}).get('control'):
                 control = result.result['control']
                 element_id = f"elem_{uuid.uuid4().hex[:8]}"
+                raw_type = str(control.get('type', 'unknown')).lower()
+                elem_type = ElementType(raw_type) if raw_type in [e.value for e in ElementType] else ElementType.UNKNOWN
                 
                 element = BlueprintElement(
                     element_id=element_id,
-                    element_type=ElementType(control['type'].lower()) if control['type'].lower() in [e.value for e in ElementType] else ElementType.UNKNOWN,
+                    element_type=elem_type,
                     name=control.get('title', '') or f"Element {element_id}",
                     description=f"{control.get('type', 'Element')}: {control.get('title', 'Unnamed')}",
                     selectors={
@@ -595,11 +616,12 @@ class BlueprintManager:
                         'class_name': control.get('class_name'),
                     },
                     bbox=control.get('rect'),
-                    confidence=0.8 if control.get('verified') else 0.5,
+                    confidence=0.8 if control.get('verified', True) else 0.5,
                     verified=True,
                 )
                 
                 blueprint.elements[element_id] = element
+                blueprint.success_count += 1
                 blueprint.updated_at = int(time.time())
                 
                 # Record the interaction
@@ -607,7 +629,7 @@ class BlueprintManager:
                     blueprint.blueprint_id,
                     element_id,
                     action,
-                    True,  # We found it successfully
+                    True,
                     details={
                         'window_title': window_title,
                         'identifier': element_identifier,
@@ -615,7 +637,8 @@ class BlueprintManager:
                     },
                 )
                 
-                # Update blueprint
+                # Update blueprint and promote if reliable
+                self.promote_blueprint(blueprint)
                 self._save_blueprint_changes(blueprint)
                 
                 logger.info(f"Learned element {element_id} in {blueprint.app_name}")
@@ -633,22 +656,50 @@ class BlueprintManager:
         window_title: str,
         description: str,
     ) -> Optional[BlueprintElement]:
-        """Find an element in a blueprint matching a description."""
-        description_lower = description.lower()
-        
+        """Find the best-matching structural element in a blueprint (UIA selectors over coords)."""
+        description_lower = description.lower().strip()
+        if not description_lower:
+            return None
+
+        best_elem: Optional[BlueprintElement] = None
+        best_score = 0.0
+        terms = [t for t in description_lower.split() if len(t) > 2]
+
         for element in blueprint.elements.values():
-            # Check name
-            if description.lower() in element.name.lower():
-                return element
-            # Check description
-            if description.lower() in element.description.lower():
-                return element
-            # Check selectors
-            for key, value in element.selectors.items():
-                if isinstance(value, str) and description.lower() in value.lower():
-                    return element
-        
-        return None
+            score = 0.0
+            name_l = (element.name or "").lower()
+            desc_l = (element.description or "").lower()
+            if description_lower == name_l:
+                score += 5.0
+            elif description_lower in name_l:
+                score += 3.0
+            if description_lower in desc_l:
+                score += 2.0
+            for val in element.selectors.values():
+                if isinstance(val, str) and description_lower in val.lower():
+                    score += 2.0
+            if terms:
+                combined = f"{name_l} {desc_l} " + " ".join(
+                    str(v).lower() for v in element.selectors.values() if isinstance(v, str)
+                )
+                score += sum(0.5 for t in terms if t in combined)
+            if score > 0:
+                score *= max(0.2, element.confidence)
+                if score > best_score:
+                    best_score = score
+                    best_elem = element
+
+        return best_elem
+
+    def get_control_identifier(self, element: BlueprintElement) -> Dict[str, Any]:
+        """Convert a BlueprintElement's dynamic UIA selectors into a WindowInteractTool identifier."""
+        selectors = element.selectors or {}
+        ident: Dict[str, Any] = {}
+        for k in ("auto_id", "title", "type", "control_id", "class_name"):
+            val = selectors.get(k)
+            if val not in (None, "", 0):
+                ident[k] = val
+        return ident
     
     async def get_action(
         self,
@@ -739,7 +790,7 @@ class BlueprintManager:
     
     def mark_stale(self, blueprint: ApplicationBlueprint) -> None:
         """Mark blueprint as stale."""
-        blueprint.status = BlueprintStatus.STAL
+        blueprint.status = BlueprintStatus.STALE
         blueprint.updated_at = int(time.time())
         self.store.save_blueprint(blueprint)
 

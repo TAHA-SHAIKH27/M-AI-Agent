@@ -6,12 +6,14 @@ Universal Windows desktop automation engine with Blueprint intelligence.
 
 from .automation import (
     DesktopAutomation,
+    DesktopObservation,
     ApplicationInfo,
     WindowInfo,
     InteractionResult,
     ApplicationState,
     InteractionMethod,
-    create_automation
+    desktop_automation,
+    create_automation,
 )
 
 from .blueprint import (
@@ -27,11 +29,13 @@ from .blueprint import (
 
 __all__ = [
     "DesktopAutomation",
+    "DesktopObservation",
     "ApplicationInfo", 
     "WindowInfo",
     "InteractionResult",
     "ApplicationState",
     "InteractionMethod",
+    "desktop_automation",
     "create_automation",
     "BlueprintManager",
     "BlueprintStore",

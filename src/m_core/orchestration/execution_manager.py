@@ -19,8 +19,9 @@ from ..utils.logging import get_logger
 from .schemas import (
     SubtaskExecutionStatus, SubtaskExecutionRecord,
 )
+from .autonomous_executor import autonomous_executor
 from ..planning.schemas import (
-    Subtask, RoutingDecision, RoutingTargetType,
+    Subtask, RoutingDecision, RoutingTargetType, ApprovalStatus,
 )
 
 logger = get_logger(__name__)
@@ -35,6 +36,9 @@ class ExecutionContext:
     correlation_id: str
     task_context: Any
     cancelled: bool = False
+    progress_callback: Optional[Callable] = None
+    cancellation_check: Optional[Callable[[], bool]] = None
+    pause_waiter: Optional[Callable[[], Awaitable[None]]] = None
 
 
 class ExecutionManager:
@@ -63,6 +67,9 @@ class ExecutionManager:
         record: SubtaskExecutionRecord,
         task_context: Any,
         correlation_id: str,
+        progress_callback: Optional[Callable] = None,
+        cancellation_check: Optional[Callable[[], bool]] = None,
+        pause_waiter: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """Execute a single subtask."""
         context = ExecutionContext(
@@ -71,11 +78,24 @@ class ExecutionManager:
             record=record,
             correlation_id=correlation_id,
             task_context=task_context,
+            progress_callback=progress_callback,
+            cancellation_check=cancellation_check,
+            pause_waiter=pause_waiter,
         )
         
         self._active_executions[subtask.id] = context
         
         try:
+            # Fail-closed enforcement for subtasks needing explicit user approval
+            if subtask.requires_approval and subtask.approval_status != ApprovalStatus.GRANTED:
+                record.status = SubtaskExecutionStatus.AWAITING_APPROVAL
+                record.error = f"Approval required before executing: {subtask.name}"
+                return {
+                    "success": False,
+                    "awaiting_approval": True,
+                    "error": record.error,
+                }
+
             record.status = SubtaskExecutionStatus.RUNNING
             record.started_at = int(datetime.now().timestamp() * 1000)
             record.assigned_target_type = routing_decision.target_type.value
@@ -84,7 +104,9 @@ class ExecutionManager:
             start_time = datetime.now()
             
             # Execute based on target type
-            if routing_decision.target_type == RoutingTargetType.TOOL:
+            if routing_decision.target_type == RoutingTargetType.AUTONOMOUS:
+                result = await self._execute_autonomous(subtask, routing_decision, context)
+            elif routing_decision.target_type == RoutingTargetType.TOOL:
                 result = await self._execute_tool(subtask, routing_decision, context)
             elif routing_decision.target_type == RoutingTargetType.AGENT:
                 result = await self._execute_agent(subtask, routing_decision, context)
@@ -98,9 +120,21 @@ class ExecutionManager:
             record.execution_time_ms = execution_time
             record.completed_at = int(datetime.now().timestamp() * 1000)
             
+            if result.get("checkpoint_state"):
+                record.metadata = {**record.metadata, "autonomous_state": result["checkpoint_state"]}
+            if result.get("pending_action"):
+                record.metadata = {**record.metadata, "pending_action": result["pending_action"]}
+            
             if result.get("success"):
                 record.status = SubtaskExecutionStatus.COMPLETED
                 record.result = result.get("result")
+                record.error = None
+            elif result.get("awaiting_approval"):
+                record.status = SubtaskExecutionStatus.AWAITING_APPROVAL
+                record.error = result.get("error")
+            elif result.get("cancelled"):
+                record.status = SubtaskExecutionStatus.CANCELLED
+                record.error = result.get("error") or "Cancelled"
             else:
                 record.status = SubtaskExecutionStatus.FAILED
                 record.error = result.get("error")
@@ -119,6 +153,31 @@ class ExecutionManager:
             
         finally:
             self._active_executions.pop(subtask.id, None)
+    
+    async def _execute_autonomous(
+        self,
+        subtask: Subtask,
+        routing_decision: RoutingDecision,
+        context: ExecutionContext,
+    ) -> Dict[str, Any]:
+        """Execute a goal-oriented autonomous workflow via AutonomousTaskExecutor."""
+        result = await autonomous_executor.execute_subtask(
+            subtask=subtask,
+            task_context=context.task_context,
+            correlation_id=context.correlation_id,
+            progress_callback=None,  # Step events already published on event_bus
+            cancellation_check=lambda: context.cancelled or bool(context.cancellation_check and context.cancellation_check()),
+            pause_waiter=context.pause_waiter,
+        )
+        audit_logger.log(
+            event_type=AuditEventType.AGENT_COMPLETED if result.get("success") else AuditEventType.AGENT_FAILED,
+            resource=subtask.id,
+            action=f"autonomous:{routing_decision.target_id}",
+            result="success" if result.get("success") else ("awaiting_approval" if result.get("awaiting_approval") else "failure"),
+            details={"error": result.get("error")} if not result.get("success") else {},
+            correlation_id=context.correlation_id,
+        )
+        return result
     
     async def _execute_tool(
         self,
@@ -139,12 +198,21 @@ class ExecutionManager:
                 if not consent_manager.is_granted(perm):
                     return {"success": False, "error": f"Consent required: {perm}"}
         
-        # Prepare arguments
-        arguments = subtask.metadata.get("arguments", {})
+        # Enforce tool-level approval even if planning missed it
+        if getattr(tool.manifest, "requires_approval", False) and subtask.approval_status != ApprovalStatus.GRANTED:
+            return {
+                "success": False,
+                "awaiting_approval": True,
+                "error": f"Approval required for tool: {tool_name}",
+            }
         
-        # If subtask has specific tool parameters, use those
-        if "tool_arguments" in subtask.metadata:
-            arguments = subtask.metadata["tool_arguments"]
+        # Prepare shallow copy of arguments
+        raw_args = subtask.metadata.get("tool_arguments", subtask.metadata.get("arguments", {}))
+        arguments = dict(raw_args) if isinstance(raw_args, dict) else {}
+        if subtask.approval_status == ApprovalStatus.GRANTED:
+            arguments["approved"] = True
+        else:
+            arguments.pop("approved", None)
         
         # Invoke tool through registry
         result = await tool_registry.invoke(
@@ -189,11 +257,21 @@ class ExecutionManager:
                 if not consent_manager.is_granted(perm):
                     return {"success": False, "error": f"Agent consent required: {perm}"}
         
-        # Prepare agent request
+        # Prepare agent request (include upstream dependency outputs when present)
         from ..agents.schemas import AgentRequest
         
+        prompt_message = subtask.description
+        dep_results = subtask.metadata.get("dependency_results")
+        if dep_results:
+            import json as _json
+            prompt_message = (
+                f"{subtask.description}\n\n"
+                f"Results from completed prerequisite subtasks:\n"
+                f"{_json.dumps(dep_results, default=str)[:4000]}"
+            )
+        
         request = AgentRequest(
-            message=subtask.description,
+            message=prompt_message,
             conversation_id=context.task_context.conversation_id,
             metadata={
                 "subtask_id": subtask.id,
@@ -204,8 +282,15 @@ class ExecutionManager:
             max_tool_calls=subtask.metadata.get("max_tool_calls", 5),
         )
         
-        # Execute agent
-        response = await agent.process_request(request)
+        try:
+            response = await agent.process_request(request)
+        except Exception as e:
+            audit_logger.log_agent(
+                agent=agent_id,
+                event="failed",
+                correlation_id=context.correlation_id,
+            )
+            return {"success": False, "error": str(e)}
         
         # Log audit
         audit_logger.log_agent(

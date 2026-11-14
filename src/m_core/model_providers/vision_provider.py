@@ -81,7 +81,7 @@ class VisionConfig:
             self.gemini_api_key = settings.gemini_api_key
         if self.gemini_base_url == "https://generativelanguage.googleapis.com/v1beta" and settings.gemini_base_url:
             self.gemini_base_url = settings.gemini_base_url
-        if self.gemini_vision_model == "gemini-1.5-flash" and settings.gemini_vision_model:
+        if self.gemini_vision_model in ("gemini-1.5-flash", "gemini-2.5-flash") and settings.gemini_vision_model:
             self.gemini_vision_model = settings.gemini_vision_model
 
 
@@ -174,6 +174,18 @@ class BaseVisionProvider(ModelProvider):
     @property
     def provider_type(self) -> str:
         return "cloud"
+
+    @property
+    def id(self) -> str:
+        return self.provider_id
+
+    @property
+    def name(self) -> str:
+        return self.provider_name
+
+    @property
+    def type(self) -> str:
+        return self.provider_type
     
     @property
     def capabilities(self) -> ModelCapability:
@@ -264,14 +276,130 @@ class BaseVisionProvider(ModelProvider):
         
         return None
     
-    def _build_analysis_prompt(self, task: str) -> str:
+    def _get_image_dimensions(self, screenshot_base64: str) -> tuple[int, int]:
+        """Decode image dimensions from base64 payload safely."""
+        try:
+            from PIL import Image
+            image_data = base64.b64decode(screenshot_base64)
+            image = Image.open(io.BytesIO(image_data))
+            return image.size
+        except Exception:
+            return (1920, 1080)
+
+    def _normalize_bbox(
+        self,
+        bbox: Dict[str, Any],
+        img_width: int,
+        img_height: int,
+        coordinate_space: str = "auto",
+    ) -> Dict[str, int]:
+        """Normalize bounding box dict to clamped image pixel coordinates."""
+        if not isinstance(bbox, dict) or not bbox:
+            return {}
+        try:
+            left = float(bbox.get("left", bbox.get("x", 0)))
+            top = float(bbox.get("top", bbox.get("y", 0)))
+            width = float(bbox.get("width", bbox.get("w", 0)))
+            height = float(bbox.get("height", bbox.get("h", 0)))
+            right = float(bbox.get("right", left + width)) if "right" in bbox else left + width
+            bottom = float(bbox.get("bottom", top + height)) if "bottom" in bbox else top + height
+        except (TypeError, ValueError):
+            return {}
+
+        if width <= 0 and right > left:
+            width = right - left
+        if height <= 0 and bottom > top:
+            height = bottom - top
+
+        vals = [left, top, right, bottom]
+        is_unit_fraction = all(0.0 <= v <= 1.0 for v in vals) and (max(vals) <= 1.0)
+        is_norm_1000 = coordinate_space == "normalized_1000"
+
+        if is_unit_fraction:
+            left *= img_width
+            top *= img_height
+            width *= img_width
+            height *= img_height
+        elif is_norm_1000:
+            left = left * img_width / 1000.0
+            top = top * img_height / 1000.0
+            width = width * img_width / 1000.0
+            height = height * img_height / 1000.0
+
+        left_i = max(0, min(img_width - 1, int(round(left))))
+        top_i = max(0, min(img_height - 1, int(round(top))))
+        width_i = max(1, min(img_width - left_i, int(round(width))))
+        height_i = max(1, min(img_height - top_i, int(round(height))))
+        return {
+            "left": left_i,
+            "top": top_i,
+            "width": width_i,
+            "height": height_i,
+            "right": left_i + width_i,
+            "bottom": top_i + height_i,
+        }
+
+    def _normalize_elements(
+        self,
+        elements: List[Dict[str, Any]],
+        img_width: int,
+        img_height: int,
+        coordinate_space: str = "auto",
+    ) -> List[Dict[str, Any]]:
+        """Normalize element bounding boxes in analysis output."""
+        if not elements:
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for elem in elements:
+            if not isinstance(elem, dict):
+                continue
+            item = dict(elem)
+            bbox = item.get("bbox")
+            if isinstance(bbox, dict) and bbox:
+                item["bbox"] = self._normalize_bbox(bbox, img_width, img_height, coordinate_space)
+            normalized.append(item)
+        return normalized
+
+    def _normalize_action(
+        self,
+        parsed: Dict[str, Any],
+        img_width: int,
+        img_height: int,
+    ) -> VisionAction:
+        """Convert parsed model output into a VisionAction with clamped pixel coordinates."""
+        action = VisionAction.from_dict(parsed)
+        params = dict(action.params or {})
+        coord_space = str(parsed.get("coordinate_space", "auto")).lower()
+
+        if "x" in params and "y" in params:
+            try:
+                x = float(params["x"])
+                y = float(params["y"])
+                if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and (x < 1.0 or y < 1.0):
+                    x *= img_width
+                    y *= img_height
+                elif coord_space == "normalized_1000":
+                    x = x * img_width / 1000.0
+                    y = y * img_height / 1000.0
+                params["x"] = max(0, min(img_width - 1, int(round(x))))
+                params["y"] = max(0, min(img_height - 1, int(round(y))))
+            except (TypeError, ValueError):
+                pass
+
+        action.params = params
+        return action
+
+    def _build_analysis_prompt(self, task: str, img_width: int = 1920, img_height: int = 1080) -> str:
         """Build prompt for screen analysis."""
-        return f"""You are a GUI automation expert. Analyze this screenshot and provide a structured JSON response.
+        return f"""You are a GUI automation expert. Analyze this screenshot ({img_width}x{img_height} pixels) and provide a structured JSON response.
 
 Task context: {task}
 
+IMPORTANT: Return bounding boxes in ACTUAL PIXEL coordinates of this image (width={img_width}, height={img_height}). Set "coordinate_space": "pixels".
+
 Return ONLY valid JSON with this exact structure:
 {{
+  "coordinate_space": "pixels",
   "description": "Brief description of what's on screen",
   "elements": [
     {{"type": "button|input|text|link|menu|checkbox|radio|dropdown|tab|window|dialog|icon|image|unknown", "label": "visible text or aria-label", "description": "what this element does", "bbox": {{"left": x, "top": y, "width": w, "height": h}}, "confidence": 0.0-1.0}}
@@ -281,18 +409,27 @@ Return ONLY valid JSON with this exact structure:
   "app_type": "notepad|word|excel|chrome|edge|explorer|terminal|steam|discord|vscode|unknown"
 }}"""
     
-    def _build_action_prompt(self, task: str, previous_actions: List[str]) -> str:
+    def _build_action_prompt(
+        self,
+        task: str,
+        previous_actions: List[str],
+        img_width: int = 1920,
+        img_height: int = 1080,
+    ) -> str:
         """Build prompt for next action planning."""
         prev = "\n".join(previous_actions) if previous_actions else "None"
-        return f"""You are a GUI automation agent. Given the current screen and task, decide the next action.
+        return f"""You are a GUI automation agent. Given the current screen ({img_width}x{img_height} pixels) and task, decide the next action.
 
 Task: {task}
 Previous actions: {prev}
 
+IMPORTANT: Return pixel coordinates relative to this image (0 <= x < {img_width}, 0 <= y < {img_height}) when specifying x,y.
+
 Return ONLY valid JSON:
 {{
-  "action": "click|type|hotkey|wait|scroll|navigate|complete|error",
-  "target": "element description or coordinates",
+  "coordinate_space": "pixels",
+  "action": "click|double_click|right_click|type|hotkey|wait|scroll|navigate|complete|error",
+  "target": "element description or visible label",
   "params": {{"text": "...", "keys": [...], "x": 0, "y": 0}},
   "reasoning": "why this action",
   "confidence": 0.0-1.0,
@@ -389,6 +526,40 @@ Return ONLY valid JSON:
     ) -> Dict[str, Any]:
         """Verify that an action produced the expected visual change."""
         raise NotImplementedError
+
+    async def find_elements(
+        self,
+        screenshot_base64: str,
+        target_description: str,
+        region: Optional[Dict[str, int]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Locate UI elements matching target_description via screen analysis."""
+        analysis = await self.analyze_screen(
+            screenshot_base64,
+            task_description=f"Locate the exact UI element matching: {target_description}",
+            region=region,
+        )
+        elements = analysis.elements or []
+        if not elements:
+            return []
+
+        query_terms = [w for w in target_description.lower().split() if len(w) > 2]
+        scored: List[tuple[float, Dict[str, Any]]] = []
+        for elem in elements:
+            if not isinstance(elem, dict) or not elem.get("bbox"):
+                continue
+            label = str(elem.get("label", "")).lower()
+            desc = str(elem.get("description", "")).lower()
+            elem_type = str(elem.get("type", "")).lower()
+            combined = f"{label} {desc} {elem_type}"
+            term_hits = sum(1 for t in query_terms if t in combined)
+            exact_bonus = 2.0 if target_description.lower() in combined else 0.0
+            conf = float(elem.get("confidence", 0.5) or 0.5)
+            score = exact_bonus + term_hits + conf
+            scored.append((score, elem))
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored]
     
     # ModelProvider abstract methods - vision providers are specialized, not general chat
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
@@ -450,23 +621,8 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
                 },
                 timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
             )
-            
-            # Test connection
-            test_response = await self._client.post(
-                "/chat/completions",
-                json={
-                    "model": self.config.nvidia_vision_model,
-                    "messages": [{"role": "user", "content": "test"}],
-                    "max_tokens": 10,
-                }
-            )
-            
-            if test_response.status_code == 200:
-                self._initialized = True
-                logger.info(f"NVIDIA vision provider initialized with model: {self.config.nvidia_vision_model}")
-            else:
-                logger.warning(f"NVIDIA vision API test failed: {test_response.status_code} - {test_response.text}")
-                self._initialized = False
+            self._initialized = True
+            logger.info(f"NVIDIA vision provider configured with model: {self.config.nvidia_vision_model}")
                 
         except Exception as e:
             logger.error(f"Failed to initialize NVIDIA vision provider: {e}")
@@ -518,9 +674,9 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
         return [ModelInfo(
             id=self.config.nvidia_vision_model,
             name=f"NVIDIA Vision ({self.config.nvidia_vision_model})",
-            description="GUI element detection and screen understanding via NVIDIA NIM",
-            capabilities={"vision": True, "gui_detection": True, "chat": True},
-            max_context_length=4096,
+            provider=self.provider_id,
+            capabilities=self.capabilities,
+            context_window=4096,
         )]
     
     async def analyze_screen(
@@ -545,15 +701,8 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
             )
         
         try:
-            # Get actual screenshot dimensions
-            import base64
-            import io
-            from PIL import Image
-            image_data = base64.b64decode(screenshot_base64)
-            image = Image.open(io.BytesIO(image_data))
-            img_width, img_height = image.size
-            
-            prompt = self._build_analysis_prompt(task_description) + f"\n\nIMPORTANT: Return bounding boxes in ACTUAL PIXEL coordinates (not normalized). The screenshot is {img_width}x{img_height} pixels. Use format: {{\"left\": x, \"top\": y, \"width\": w, \"height\": h}} where x,y,w,h are pixel values."
+            img_width, img_height = self._get_image_dimensions(screenshot_base64)
+            prompt = self._build_analysis_prompt(task_description, img_width, img_height)
             
             messages = [
                 {
@@ -590,20 +739,13 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
                 parsed = self._parse_vision_json(content)
                 
                 if "error" not in parsed:
-                    # Convert any normalized coordinates to pixel coordinates
-                    elements = parsed.get("elements", [])
-                    for elem in elements:
-                        bbox = elem.get("bbox", {})
-                        # Check if coordinates appear normalized (0-1000 range)
-                        if bbox and bbox.get("left", 0) <= 1000 and bbox.get("top", 0) <= 1000:
-                            # Convert from normalized (0-1000) to actual pixels
-                            bbox["left"] = int(bbox["left"] * img_width / 1000)
-                            bbox["top"] = int(bbox["top"] * img_height / 1000)
-                            bbox["width"] = int(bbox["width"] * img_width / 1000)
-                            bbox["height"] = int(bbox["height"] * img_height / 1000)
-                            bbox["right"] = bbox["left"] + bbox["width"]
-                            bbox["bottom"] = bbox["top"] + bbox["height"]
-                            elem["bbox"] = bbox
+                    coord_space = str(parsed.get("coordinate_space", "auto")).lower()
+                    elements = self._normalize_elements(
+                        parsed.get("elements", []),
+                        img_width,
+                        img_height,
+                        coord_space,
+                    )
                     
                     return ScreenAnalysis(
                         description=parsed.get("description", "No description"),
@@ -657,7 +799,8 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
             )
         
         try:
-            prompt = self._build_action_prompt(current_task, previous_actions or [])
+            img_width, img_height = self._get_image_dimensions(screenshot_base64)
+            prompt = self._build_action_prompt(current_task, previous_actions or [], img_width, img_height)
             
             messages = [
                 {
@@ -694,7 +837,7 @@ class NVIDIANIMVisionProvider(BaseVisionProvider):
                 parsed = self._parse_vision_json(content)
                 
                 if "error" not in parsed:
-                    return VisionAction.from_dict(parsed)
+                    return self._normalize_action(parsed, img_width, img_height)
             
             return VisionAction(
                 action="error",
@@ -798,22 +941,8 @@ class GeminiVisionProvider(BaseVisionProvider):
                 },
                 timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
             )
-            
-            # Test connection
-            test_response = await self._client.post(
-                f"/models/{self.config.gemini_vision_model}:generateContent",
-                json={
-                    "contents": [{"parts": [{"text": "test"}]}],
-                    "generationConfig": {"maxOutputTokens": 10},
-                }
-            )
-            
-            if test_response.status_code == 200:
-                self._initialized = True
-                logger.info(f"Gemini vision provider initialized with model: {self.config.gemini_vision_model}")
-            else:
-                logger.warning(f"Gemini vision API test failed: {test_response.status_code} - {test_response.text}")
-                self._initialized = False
+            self._initialized = True
+            logger.info(f"Gemini vision provider configured with model: {self.config.gemini_vision_model}")
                 
         except Exception as e:
             logger.error(f"Failed to initialize Gemini vision provider: {e}")
@@ -864,9 +993,9 @@ class GeminiVisionProvider(BaseVisionProvider):
         return [ModelInfo(
             id=self.config.gemini_vision_model,
             name=f"Gemini Vision ({self.config.gemini_vision_model})",
-            description="GUI element detection and screen understanding via Google Gemini",
-            capabilities={"vision": True, "gui_detection": True, "chat": True},
-            max_context_length=4096,
+            provider=self.provider_id,
+            capabilities=self.capabilities,
+            context_window=4096,
         )]
     
     def _gemini_payload(self, prompt: str, image_base64: str, max_tokens: int = 4096) -> Dict[str, Any]:
@@ -931,7 +1060,8 @@ class GeminiVisionProvider(BaseVisionProvider):
             )
         
         try:
-            prompt = self._build_analysis_prompt(task_description)
+            img_width, img_height = self._get_image_dimensions(screenshot_base64)
+            prompt = self._build_analysis_prompt(task_description, img_width, img_height)
             payload = self._gemini_payload(prompt, screenshot_base64, max_tokens=8192)
             
             response = await self._gemini_request(
@@ -943,14 +1073,21 @@ class GeminiVisionProvider(BaseVisionProvider):
                 parsed = self._parse_gemini_response(response)
                 
                 if "error" not in parsed:
+                    coord_space = str(parsed.get("coordinate_space", "auto")).lower()
+                    elements = self._normalize_elements(
+                        parsed.get("elements", []),
+                        img_width,
+                        img_height,
+                        coord_space,
+                    )
                     return ScreenAnalysis(
                         description=parsed.get("description", "No description"),
-                        elements=parsed.get("elements", []),
+                        elements=elements,
                         text_content=parsed.get("text_content", ""),
                         suggested_actions=parsed.get("suggested_actions", []),
                         app_type=parsed.get("app_type", "unknown"),
                         model_type="gemini",
-                        screenshot_dimensions=parsed.get("screenshot_dimensions", {}),
+                        screenshot_dimensions={"width": img_width, "height": img_height},
                     )
             
             return ScreenAnalysis(
@@ -995,7 +1132,8 @@ class GeminiVisionProvider(BaseVisionProvider):
             )
         
         try:
-            prompt = self._build_action_prompt(current_task, previous_actions or [])
+            img_width, img_height = self._get_image_dimensions(screenshot_base64)
+            prompt = self._build_action_prompt(current_task, previous_actions or [], img_width, img_height)
             payload = self._gemini_payload(prompt, screenshot_base64, max_tokens=2048)
             
             response = await self._gemini_request(
@@ -1007,7 +1145,7 @@ class GeminiVisionProvider(BaseVisionProvider):
                 parsed = self._parse_gemini_response(response)
                 
                 if "error" not in parsed:
-                    return VisionAction.from_dict(parsed)
+                    return self._normalize_action(parsed, img_width, img_height)
             
             return VisionAction(
                 action="error",
@@ -1189,11 +1327,19 @@ class VisionProviderFactory:
         for provider in providers_to_try:
             try:
                 result = await provider.analyze_screen(screenshot_base64, task_description, region)
-                if result and "error" not in result.to_dict():
+                desc_lower = (result.description or "").lower()
+                is_failure = (
+                    not result
+                    or desc_lower.startswith("analysis failed:")
+                    or desc_lower.startswith("cannot analyze screen:")
+                    or desc_lower.startswith("error:")
+                )
+                if not is_failure:
                     if provider != self._current_provider:
                         self._current_provider = provider
                         logger.info(f"Fallback to vision provider: {provider.provider_name}")
                     return result
+                last_error = result.description if result else "Empty result"
             except Exception as e:
                 last_error = e
                 logger.warning(f"Vision provider {provider.provider_name} failed: {e}")
@@ -1294,6 +1440,44 @@ class VisionProviderFactory:
         
         return {"verified": False, "confidence": 0.0, "error": "All vision providers failed"}
 
+    async def find_elements(
+        self,
+        screenshot_base64: str,
+        target_description: str,
+        region: Optional[Dict[str, int]] = None,
+        provider_type: Optional[VisionProviderType] = None,
+    ) -> List[Dict[str, Any]]:
+        """Locate elements matching description with automatic provider fallback."""
+        analysis = await self.analyze_screen(
+            screenshot_base64,
+            task_description=f"Locate the exact UI element matching: {target_description}",
+            region=region,
+            provider_type=provider_type,
+        )
+        elements = analysis.elements or []
+        if not elements:
+            return []
+        query_terms = [w for w in target_description.lower().split() if len(w) > 2]
+        scored = []
+        for elem in elements:
+            if not isinstance(elem, dict) or not elem.get("bbox"):
+                continue
+            combined = f"{elem.get('label', '')} {elem.get('description', '')} {elem.get('type', '')}".lower()
+            term_hits = sum(1 for t in query_terms if t in combined)
+            exact_bonus = 2.0 if target_description.lower() in combined else 0.0
+            conf = float(elem.get("confidence", 0.5) or 0.5)
+            scored.append((exact_bonus + term_hits + conf, elem))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored]
+
+    async def close(self) -> None:
+        """Close all initialized vision provider clients."""
+        for provider in self._providers.values():
+            try:
+                await provider.close()
+            except Exception as e:
+                logger.warning(f"Error closing vision provider {provider.provider_name}: {e}")
+
 
 # Global factory instance
 _vision_factory: Optional[VisionProviderFactory] = None
@@ -1308,6 +1492,14 @@ async def get_vision_factory(config: Optional[VisionConfig] = None) -> VisionPro
     return _vision_factory
 
 
+async def close_vision_factory() -> None:
+    """Close and reset the global vision provider factory if initialized."""
+    global _vision_factory
+    if _vision_factory is not None:
+        await _vision_factory.close()
+        _vision_factory = None
+
+
 # Export
 __all__ = [
     "VisionProviderType",
@@ -1319,4 +1511,5 @@ __all__ = [
     "GeminiVisionProvider",
     "VisionProviderFactory",
     "get_vision_factory",
+    "close_vision_factory",
 ]

@@ -139,7 +139,12 @@ class BaseTool(ABC):
                 input_schema = m.get('input_schema', {})
             else:
                 input_schema = getattr(m, 'input_schema', {})
-            jsonschema.validate(instance=arguments, schema=input_schema)
+            declared_props = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
+            args_to_validate = {
+                k: v for k, v in arguments.items()
+                if k in declared_props or k not in ("approved", "approval_token")
+            } if isinstance(arguments, dict) else arguments
+            jsonschema.validate(instance=args_to_validate, schema=input_schema)
         except jsonschema.ValidationError as e:
             raise ToolValidationError(
                 f"Invalid input for tool {self.name}: {e.message}",

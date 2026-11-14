@@ -10,7 +10,12 @@ from .ollama import OllamaProvider
 from .lm_studio import LMStudioProvider
 from .openai_provider import OpenAIProvider
 from .anthropic import AnthropicProvider
-from .vision_provider import VisionProviderFactory as VisionProviderFactoryNew, VisionConfig
+from .vision_provider import (
+    BaseVisionProvider,
+    VisionConfig,
+    VisionProviderFactory as VisionProviderFactoryNew,
+    get_vision_factory,
+)
 from ..config import settings
 from ..core.exceptions import ProviderError
 from ..utils.logging import get_logger
@@ -39,20 +44,13 @@ class ProviderFactory:
             else:
                 logger.warning("NVIDIA API key not configured - Nemotron unavailable")
             
-            # 2. Vision Provider Factory (for GUI understanding) - new vision system
+            # 2. Vision Provider Factory (for GUI understanding) - lazy async HTTP client setup
             try:
-                # Run async initialization in event loop
-                loop = asyncio.new_event_loop()
-                try:
-                    self._vision_factory = loop.run_until_complete(get_vision_factory())
-                    if self._vision_factory._current_provider:
-                        logger.info(f"Registered Vision Provider Factory: {self._vision_factory._current_provider.provider_name}")
-                    else:
-                        logger.warning("Vision Provider Factory registered but no providers available")
-                finally:
-                    loop.close()
+                self._vision_factory = VisionProviderFactoryNew(VisionConfig())
+                logger.info("Registered Vision Provider Factory (lazy async initialization)")
             except Exception as e:
-                logger.warning(f"Failed to initialize Vision Provider Factory: {e}")
+                logger.warning(f"Failed to configure Vision Provider Factory: {e}")
+                self._vision_factory = None
             
             # 3. Fallback: Ollama (local)
             ollama = OllamaProvider()
@@ -93,13 +91,23 @@ class ProviderFactory:
         # Already initialized in __init__
         pass
     
-    async def get_vision_factory(self):
-        """Get the vision provider factory for GUI understanding."""
+    async def get_vision_factory(self) -> Optional[VisionProviderFactoryNew]:
+        """Get the initialized vision provider factory for GUI understanding."""
+        if self._vision_factory is None:
+            self._vision_factory = await get_vision_factory()
+        elif not self._vision_factory._initialized:
+            await self._vision_factory.initialize()
         return self._vision_factory
-    
+
+    async def get_vision_provider(self) -> Optional[BaseVisionProvider]:
+        """Get the active vision provider asynchronously."""
+        factory = await self.get_vision_factory()
+        return await factory.get_provider() if factory else None
+
     async def wait_for_initialization(self) -> None:
         """Wait for all providers to finish initialization."""
-        pass
+        if self._vision_factory and not self._vision_factory._initialized:
+            await self._vision_factory.initialize()
     
     @property
     def providers(self) -> List[ModelProvider]:
@@ -109,22 +117,33 @@ class ProviderFactory:
         return self._providers[0] if self._providers else None
     
     def get_all_providers(self) -> List[ModelProvider]:
-        """Get all providers including vision provider."""
-        return self._providers.copy()
+        """Get all providers including active vision provider if initialized."""
+        all_providers = self._providers.copy()
+        vision_prov = self.get_vision_provider_sync()
+        if vision_prov and vision_prov not in all_providers:
+            all_providers.append(vision_prov)
+        return all_providers
     
     def get_provider(self, provider_id: str) -> Optional[ModelProvider]:
         # Check chat providers first
         provider = next((p for p in self._providers if p.id == provider_id), None)
         if provider:
             return provider
-        # Check vision provider
-        if self._vision_provider and self._vision_provider.id == provider_id:
-            return self._vision_provider
+        # Check active/registered vision providers
+        if self._vision_factory:
+            vision_prov = self._vision_factory._current_provider
+            if vision_prov and vision_prov.provider_id == provider_id:
+                return vision_prov
+            for vprov in self._vision_factory._providers.values():
+                if vprov.provider_id == provider_id:
+                    return vprov
         return None
     
-    def get_vision_provider_sync(self) -> Optional[VisionModelProvider]:
-        """Get the vision provider synchronously."""
-        return self._vision_provider
+    def get_vision_provider_sync(self) -> Optional[BaseVisionProvider]:
+        """Get the current vision provider synchronously if initialized."""
+        if self._vision_factory:
+            return self._vision_factory._current_provider
+        return None
     
     async def complete_with_fallback(self, request: CompletionRequest) -> CompletionResponse:
         """Try providers in order until one succeeds."""
@@ -219,6 +238,23 @@ class ProviderFactory:
         """Replace provider chain for testing."""
         self._providers = providers
         logger.info(f"Replaced provider chain with {len(providers)} test providers")
+
+    async def close(self) -> None:
+        """Close initialized chat and vision provider clients cleanly."""
+        if self._vision_factory is not None:
+            try:
+                await self._vision_factory.close()
+            except Exception as e:
+                logger.warning(f"Error closing vision factory: {e}")
+            self._vision_factory = None
+
+        for provider in self._providers:
+            close_fn = getattr(provider, "close", None)
+            if callable(close_fn):
+                try:
+                    await close_fn()
+                except Exception as e:
+                    logger.warning(f"Error closing provider {provider.id}: {e}")
 
 
 # Global factory instance

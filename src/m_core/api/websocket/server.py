@@ -15,6 +15,7 @@ from m_core.agents import agent_registry
 from m_core.agents.schemas import AgentRequest, AgentMessage
 from m_core.orchestration import orchestrator
 from m_core.orchestration.schemas import TaskExecutionStatus, SubtaskExecutionStatus
+from m_core.orchestration.state_manager import state_manager
 from m_core.core.events import event_bus, Event
 from m_core.security import consent_manager
 from m_core.core.types import to_builtins
@@ -403,8 +404,68 @@ async def handle_cancel_task(connection: WSConnection, payload: Dict[str, Any]) 
     })
 
 
+async def handle_pause_task(connection: WSConnection, payload: Dict[str, Any]) -> None:
+    """Handle task pause request."""
+    task_id = payload.get("task_id")
+    if not task_id:
+        await send_error(connection.client_id, "task_id required")
+        return
+
+    await connection_manager.subscribe_to_task(connection.client_id, task_id)
+    success = await orchestrator.pause_task(task_id)
+    await send_json(connection.client_id, {
+        "type": WSMessageType.TASK_PAUSED.value,
+        "payload": {
+            "task_id": task_id,
+            "success": success,
+            "status": TaskStatus.PAUSED.value if success else None,
+        },
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    })
+
+
+async def handle_resume_task(connection: WSConnection, payload: Dict[str, Any]) -> None:
+    """Handle task resume request (paused task or saved checkpoint)."""
+    task_id = payload.get("task_id")
+    checkpoint_id = payload.get("checkpoint_id")
+    if not task_id:
+        await send_error(connection.client_id, "task_id required")
+        return
+
+    await connection_manager.subscribe_to_task(connection.client_id, task_id)
+    success = False
+    try:
+        if checkpoint_id:
+            cp = await state_manager.get_checkpoint(checkpoint_id)
+            if cp and cp.task_id == task_id:
+                await orchestrator.resume_from_checkpoint(checkpoint_id)
+                success = True
+        else:
+            success = await orchestrator.resume_task(task_id)
+            if not success:
+                latest_cp = await state_manager.get_latest_checkpoint(task_id)
+                if latest_cp:
+                    await orchestrator.resume_from_checkpoint(latest_cp.checkpoint_id)
+                    success = True
+    except Exception as e:
+        await send_error(connection.client_id, f"Failed to resume task '{task_id}': {e}", "RESUME_FAILED")
+        return
+
+    await send_json(connection.client_id, {
+        "type": WSMessageType.TASK_RESUMED.value,
+        "payload": {
+            "task_id": task_id,
+            "checkpoint_id": checkpoint_id,
+            "success": success,
+            "status": TaskStatus.RUNNING.value if success else None,
+        },
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    })
+
+
 async def handle_approval(connection: WSConnection, payload: WSApprovePayload) -> None:
     """Handle approval/denial for a task."""
+    await connection_manager.subscribe_to_task(connection.client_id, payload.task_id)
     success = await orchestrator.approve_subtask(
         task_id=payload.task_id,
         subtask_id=payload.subtask_id,
@@ -450,6 +511,25 @@ async def send_error(client_id: str, error: str, error_code: str = "ERROR") -> N
     })
 
 
+_STATUS_FALLBACKS: Dict[str, TaskStatus] = {
+    "retrying": TaskStatus.RUNNING,
+    "skipped": TaskStatus.FAILED,
+}
+
+
+def _to_task_status(raw_status: Any, default: TaskStatus = TaskStatus.RUNNING) -> TaskStatus:
+    """Normalize internal orchestration/subtask statuses to public TaskStatus enum values."""
+    if isinstance(raw_status, TaskStatus):
+        return raw_status
+    value = str(raw_status or "").lower()
+    if value in _STATUS_FALLBACKS:
+        return _STATUS_FALLBACKS[value]
+    try:
+        return TaskStatus(value)
+    except ValueError:
+        return default
+
+
 # Event handlers for orchestration events
 async def on_task_progress(event: Event) -> None:
     """Handle task progress events."""
@@ -457,23 +537,84 @@ async def on_task_progress(event: Event) -> None:
     if not task_id:
         return
     
+    status_enum = _to_task_status(event.payload.get("status", "running"))
     await connection_manager.broadcast_to_task(task_id, {
         "type": WSMessageType.TASK_PROGRESS.value,
         "payload": WSTaskProgressPayload(
             task_id=task_id,
             subtask_id=event.payload.get("subtask_id"),
-            status=TaskStatus(event.payload.get("status", "running")),
+            status=status_enum,
             completed=event.payload.get("completed", 0),
             total=event.payload.get("total", 0),
             message=event.payload.get("message"),
         ).to_dict() if hasattr(WSTaskProgressPayload, 'to_dict') else {
             "task_id": task_id,
             "subtask_id": event.payload.get("subtask_id"),
-            "status": event.payload.get("status", "running"),
+            "status": status_enum.value,
             "completed": event.payload.get("completed", 0),
             "total": event.payload.get("total", 0),
             "message": event.payload.get("message"),
         },
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    })
+
+
+async def on_task_step(event: Event) -> None:
+    """Handle autonomous executor step events."""
+    task_id = event.payload.get("task_id")
+    if not task_id:
+        return
+
+    await connection_manager.broadcast_to_task(task_id, {
+        "type": WSMessageType.TASK_STEP.value,
+        "payload": dict(event.payload),
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    })
+
+
+async def on_task_paused(event: Event) -> None:
+    """Handle task paused events."""
+    task_id = event.payload.get("task_id")
+    if not task_id:
+        return
+
+    await connection_manager.broadcast_to_task(task_id, {
+        "type": WSMessageType.TASK_PAUSED.value,
+        "payload": {
+            "task_id": task_id,
+            "status": TaskStatus.PAUSED.value,
+            "reason": event.payload.get("reason", "Paused by user"),
+        },
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    })
+
+
+async def on_task_resumed(event: Event) -> None:
+    """Handle task resumed events."""
+    task_id = event.payload.get("task_id")
+    if not task_id:
+        return
+
+    await connection_manager.broadcast_to_task(task_id, {
+        "type": WSMessageType.TASK_RESUMED.value,
+        "payload": {
+            "task_id": task_id,
+            "status": TaskStatus.RUNNING.value,
+            "checkpoint_id": event.payload.get("checkpoint_id"),
+        },
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    })
+
+
+async def on_task_replanned(event: Event) -> None:
+    """Handle adaptive replanning events."""
+    task_id = event.payload.get("task_id")
+    if not task_id:
+        return
+
+    await connection_manager.broadcast_to_task(task_id, {
+        "type": WSMessageType.TASK_REPLANNED.value,
+        "payload": dict(event.payload),
         "timestamp": int(datetime.now().timestamp() * 1000),
     })
 
@@ -513,7 +654,12 @@ async def on_task_completed(event: Event) -> None:
     if not task_id:
         return
     
-    success = event.payload.get("result") == "success"
+    raw_result = event.payload.get("result")
+    success = (
+        event.payload.get("success") is True
+        or raw_result in ("success", "partial")
+        or (raw_result is not None and not isinstance(raw_result, str) and not event.payload.get("error"))
+    )
     
     await connection_manager.broadcast_to_task(task_id, {
         "type": WSMessageType.TASK_COMPLETED.value,
@@ -603,16 +749,31 @@ async def on_tool_event(event: Event) -> None:
     })
 
 
-# Register event handlers
+# Register event handlers (idempotent across reconnects)
+_handlers_registered = False
+
+
 async def register_event_handlers() -> None:
-    """Register WebSocket event handlers."""
-    await event_bus.subscribe("task.progress", on_task_progress)
-    await event_bus.subscribe("task.awaiting_approval", on_task_awaiting_approval)
-    await event_bus.subscribe("task.completed", on_task_completed)
-    await event_bus.subscribe("task.failed", on_task_failed)
-    await event_bus.subscribe("task.cancelled", on_task_cancelled)
-    await event_bus.subscribe("tool_executed", on_tool_event)
-    await event_bus.subscribe("tool_failed", on_tool_event)
+    """Register WebSocket event handlers once."""
+    global _handlers_registered
+    if _handlers_registered:
+        return
+    _handlers_registered = True
+    try:
+        await event_bus.subscribe("task.progress", on_task_progress)
+        await event_bus.subscribe("task.step", on_task_step)
+        await event_bus.subscribe("task.awaiting_approval", on_task_awaiting_approval)
+        await event_bus.subscribe("task.paused", on_task_paused)
+        await event_bus.subscribe("task.resumed", on_task_resumed)
+        await event_bus.subscribe("task.replanned", on_task_replanned)
+        await event_bus.subscribe("task.completed", on_task_completed)
+        await event_bus.subscribe("task.failed", on_task_failed)
+        await event_bus.subscribe("task.cancelled", on_task_cancelled)
+        await event_bus.subscribe("tool_executed", on_tool_event)
+        await event_bus.subscribe("tool_failed", on_tool_event)
+    except Exception:
+        _handlers_registered = False
+        raise
 
 
 @router.websocket("")
@@ -620,6 +781,7 @@ async def websocket_endpoint(
     websocket: WebSocket,
     client_id: str = Query(None),
     conversation_id: str = Query(None),
+    task_id: Optional[str] = Query(None),
     token: Optional[str] = Query(None),
 ):
     """WebSocket endpoint for real-time communication."""
@@ -651,6 +813,9 @@ async def websocket_endpoint(
     if conversation_id:
         await connection_manager.set_conversation(client_id, conversation_id)
         connection.conversation_id = conversation_id
+
+    if task_id:
+        await connection_manager.subscribe_to_task(client_id, task_id)
     
     # Send connection acknowledgment
     await send_json(client_id, {
@@ -658,13 +823,13 @@ async def websocket_endpoint(
         "payload": {
             "client_id": client_id,
             "conversation_id": conversation_id,
+            "task_id": task_id,
         },
         "timestamp": int(datetime.now().timestamp() * 1000),
     })
     
-    # Register event handlers on first connection
-    if len(connection_manager._connections) == 1:
-        await register_event_handlers()
+    # Register event handlers idempotently
+    await register_event_handlers()
     
     try:
         while True:
@@ -690,6 +855,12 @@ async def websocket_endpoint(
             
             elif msg_type == WSMessageType.CANCEL_TASK.value:
                 await handle_cancel_task(connection, payload)
+
+            elif msg_type == WSMessageType.PAUSE_TASK.value:
+                await handle_pause_task(connection, payload)
+
+            elif msg_type == WSMessageType.RESUME_TASK.value:
+                await handle_resume_task(connection, payload)
             
             elif msg_type == WSMessageType.APPROVE_ACTION.value:
                 try:
@@ -697,6 +868,15 @@ async def websocket_endpoint(
                     await handle_approval(connection, approve_payload)
                 except Exception as e:
                     await send_error(client_id, f"Invalid approval payload: {e}", "INVALID_PAYLOAD")
+
+            elif msg_type == WSMessageType.DENY_ACTION.value:
+                try:
+                    deny_data = dict(payload)
+                    deny_data["approved"] = False
+                    deny_payload = WSApprovePayload(**deny_data)
+                    await handle_approval(connection, deny_payload)
+                except Exception as e:
+                    await send_error(client_id, f"Invalid denial payload: {e}", "INVALID_PAYLOAD")
             
             elif msg_type == WSMessageType.PING.value:
                 await handle_ping(connection)

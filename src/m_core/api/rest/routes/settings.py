@@ -118,10 +118,16 @@ async def get_provider_health(
     """Get provider health status."""
     try:
         health_results = await provider_factory.health_check_all()
+        primary = provider_factory.get_primary()
+        primary_healthy = bool(
+            primary
+            and primary.id in health_results
+            and health_results[primary.id].get("healthy", False)
+        )
         
         return {
             "providers": health_results,
-            "primary_healthy": False,
+            "primary_healthy": primary_healthy,
         }
         
     except Exception as e:

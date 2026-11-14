@@ -29,6 +29,7 @@ class TaskStatus(str, Enum):
     PLANNED = "planned"
     ROUTED = "routed"
     RUNNING = "running"
+    PAUSED = "paused"
     WAITING = "waiting"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -59,6 +60,7 @@ class RoutingTargetType(str, Enum):
     AGENT = "agent"
     TOOL = "tool"
     MODEL_PROVIDER = "model_provider"
+    AUTONOMOUS = "autonomous"
 
 
 class ApprovalStatus(str, Enum):

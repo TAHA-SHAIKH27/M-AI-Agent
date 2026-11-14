@@ -12,16 +12,15 @@ from ..model_providers import provider_factory
 from ..agents import agent_registry
 from ..agents.schemas import AgentManifest
 from ..tools import tool_registry
-from ..tools.schemas import ToolManifest, ToolRiskLevel
+from m_core.common_schemas import ToolManifest, ToolRiskLevel
 from ..security import consent_manager
 from ..core.events import event_bus
 from ..utils.logging import get_logger
-from ..planning.schemas import (
+from .schemas import (
     RoutingTargetType, RoutingDecision, RoutingPlan,
     ExecutionPlan, Subtask, TaskAnalysis,
     ApprovalStatus,
 )
-from .schemas import TaskExecutionStatus
 
 logger = get_logger(__name__)
 
@@ -75,7 +74,7 @@ class ControlMethodSelector:
     ]
 
     def __init__(self):
-        self._tool_cache: Dict[str, ToolManifest] = {}
+        self._tool_cache: Dict[str, Dict[str, Any]] = {}
         self._initialized = False
     
     async def initialize(self):
@@ -88,11 +87,12 @@ class ControlMethodSelector:
     
     def _check_tool_available(self, tool_name: str) -> bool:
         """Check if tool is available and consent granted."""
-        if tool_name not in self._tool_cache:
+        tool = tool_registry.get_tool(tool_name)
+        if not tool:
             return False
-        tool = self._tool_cache[tool_name]
-        if hasattr(tool.manifest, 'required_permissions'):
-            for perm in tool.manifest.required_permissions:
+        manifest = getattr(tool, "manifest", None)
+        if manifest and hasattr(manifest, "required_permissions"):
+            for perm in manifest.required_permissions:
                 if not consent_manager.is_granted(perm):
                     return False
         return True
@@ -162,7 +162,12 @@ class ControlMethodSelector:
         visual_tools = self._get_available_visual_tools(capability)
         
         # Decision logic
-        if preferred == ControlMethod.DIRECT and direct_tools:
+        if subtask.metadata.get("execution_mode") in ("autonomous_desktop", "autonomous_browser"):
+            method = ControlMethod.HYBRID
+            primary = subtask.metadata["execution_mode"]
+            fallbacks = (direct_tools[:2] + visual_tools[:2])
+            reasoning = f"Closed-loop autonomous UI/tool execution ({primary})"
+        elif preferred == ControlMethod.DIRECT and direct_tools:
             method = ControlMethod.DIRECT
             primary = direct_tools[0]
             fallbacks = direct_tools[1:] + visual_tools[:2]
@@ -316,7 +321,7 @@ class EnhancedIntelligentRouter:
             selection = await self._selector.select_control_method(subtask, execution_plan)
             for fallback_tool in selection["fallback_tools"]:
                 if fallback_tool not in (failed_targets or []):
-                    if await self._selector._check_tool_available(fallback_tool):
+                    if self._selector._check_tool_available(fallback_tool):
                         return RoutingDecision(
                             subtask_id=subtask.id,
                             target_type=RoutingTargetType.TOOL,

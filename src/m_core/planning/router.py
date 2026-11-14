@@ -18,7 +18,7 @@ from ..utils.logging import get_logger
 from .schemas import (
     RoutingTargetType, RoutingDecision, RoutingPlan,
     ExecutionPlan, Subtask, TaskAnalysis,
-    ApprovalStatus,
+    ApprovalStatus, TaskType,
 )
 
 logger = get_logger(__name__)
@@ -94,6 +94,32 @@ class IntelligentRouter:
         execution_plan: ExecutionPlan,
     ) -> RoutingDecision:
         """Route a single subtask to the best target."""
+        
+        # Route autonomous GUI / browser workflow subtasks to autonomous executor
+        execution_mode = subtask.metadata.get("execution_mode")
+        if execution_mode in ("autonomous_desktop", "autonomous_browser"):
+            return RoutingDecision(
+                subtask_id=subtask.id,
+                target_type=RoutingTargetType.AUTONOMOUS,
+                target_id=execution_mode,
+                confidence=0.95,
+                reasoning=f"Goal-oriented autonomous workflow ({execution_mode})",
+                fallback_targets=[
+                    {"type": "agent", "id": "general_assistant", "reason": "Conversational fallback"}
+                ],
+                metadata={"execution_mode": execution_mode},
+            )
+        
+        # Simple / synthesis subtasks route directly to conversational assistant
+        if subtask.task_type == TaskType.SIMPLE and not subtask.assigned_tool:
+            target_agent = subtask.assigned_agent or "general_assistant"
+            return RoutingDecision(
+                subtask_id=subtask.id,
+                target_type=RoutingTargetType.AGENT,
+                target_id=target_agent,
+                confidence=0.9,
+                reasoning="Simple/synthesis subtask handled by assistant agent",
+            )
         
         # If subtask already has assigned tool, use it
         if subtask.assigned_tool:

@@ -56,11 +56,40 @@ except ImportError:
     WIN32_AVAILABLE = False
 
 
+_DPI_INITIALIZED = False
+
+
+def _ensure_dpi_aware() -> None:
+    """Enable per-monitor DPI awareness once on Windows so capture & cursor coordinates match."""
+    global _DPI_INITIALIZED
+    if _DPI_INITIALIZED:
+        return
+    import sys
+    if sys.platform != "win32":
+        _DPI_INITIALIZED = True
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        try:
+            user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        except Exception:
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            except Exception:
+                user32.SetProcessDPIAware()
+    except Exception:
+        pass
+    _DPI_INITIALIZED = True
+
+
 def _ensure_default_desktop() -> None:
     """Ensure the calling thread is attached to the interactive Windows default desktop."""
     import sys
     if sys.platform != "win32":
         return
+    _ensure_dpi_aware()
     try:
         import ctypes
         user32 = ctypes.windll.user32
@@ -171,6 +200,9 @@ class ScreenCaptureTool(BaseTool):
                 "image_base64": {"type": "string"},
                 "width": {"type": "integer"},
                 "height": {"type": "integer"},
+                "origin_x": {"type": "integer"},
+                "origin_y": {"type": "integer"},
+                "mode": {"type": "string"},
                 "format": {"type": "string"},
             },
         },
@@ -304,6 +336,9 @@ class ScreenCaptureTool(BaseTool):
                             "image_path": output_path,
                             "width": width,
                             "height": height,
+                            "origin_x": int(monitor.get("left", 0)),
+                            "origin_y": int(monitor.get("top", 0)),
+                            "mode": mode,
                             "format": output_format,
                         },
                         "error": None,
@@ -326,6 +361,9 @@ class ScreenCaptureTool(BaseTool):
                             "image_base64": img_base64,
                             "width": width,
                             "height": height,
+                            "origin_x": int(monitor.get("left", 0)),
+                            "origin_y": int(monitor.get("top", 0)),
+                            "mode": mode,
                             "format": output_format,
                         },
                         "error": None,
@@ -803,8 +841,8 @@ class VisualFindTool(BaseTool):
                 if not color or len(color) != 3:
                     return {"success": False, "error": "color must be [R, G, B]", "error_code": "INVALID_INPUT"}
                 
-                # Find pixels matching color
-                target = np.array(color, dtype=np.uint8)
+                # Convert input RGB color to BGR to match OpenCV screen representation
+                target = np.array([int(color[2]), int(color[1]), int(color[0])], dtype=np.uint8)
                 diff = np.abs(screen.astype(np.int16) - target.astype(np.int16))
                 mask = np.all(diff <= 10, axis=2)  # Tolerance of 10
                 
@@ -823,7 +861,15 @@ class VisualFindTool(BaseTool):
                             "confidence": 0.9,
                         })
             
-            # Sort by confidence
+            # Sort by confidence and offset to absolute virtual-screen coordinates
+            origin_x = int(monitor.get("left", 0))
+            origin_y = int(monitor.get("top", 0))
+            for m in matches:
+                m["x"] = int(m["x"]) + origin_x
+                m["y"] = int(m["y"]) + origin_y
+                m["center_x"] = m["x"] + int(m.get("width", 0)) // 2
+                m["center_y"] = m["y"] + int(m.get("height", 0)) // 2
+
             matches.sort(key=lambda m: m["confidence"], reverse=True)
             
             if not return_all and matches:
@@ -1094,78 +1140,110 @@ class KeyboardInputTool(BaseTool):
                 key_down(vk)
                 await asyncio.sleep(0.02)
                 key_up(vk)
-            
-            if action == "type":
-                text = args.get("text", "")
-                interval = args.get("interval", 0.05)
-                
-                # If there is a foreground window with an Edit control or focused window,
-                # also send characters via WM_CHAR or WM_SETTEXT for robust typing on Windows 11
-                fg_hwnd = win32gui.GetForegroundWindow()
-                edit_hwnd = None
-                if fg_hwnd:
-                    def _find_edit(ch, _):
-                        nonlocal edit_hwnd
-                        if win32gui.GetClassName(ch).lower() == "edit":
-                            edit_hwnd = ch
-                            return False
-                        return True
+
+            def resolve_vk(key_name: str) -> Optional[int]:
+                k = (key_name or "").strip().lower()
+                if not k:
+                    return None
+                if k in self.VK_MAP:
+                    return self.VK_MAP[k]
+                if len(k) == 1:
                     try:
-                        win32gui.EnumChildWindows(fg_hwnd, _find_edit, None)
+                        import ctypes
+                        vk_res = ctypes.windll.user32.VkKeyScanW(ord(key_name))
+                        if vk_res != -1:
+                            return vk_res & 0xFF
                     except Exception:
                         pass
-                
-                target_w = edit_hwnd or fg_hwnd
-                if target_w and WIN32_AVAILABLE:
+                    return ord(k.upper())
+                return None
+
+            def send_unicode_char(ch: str) -> bool:
+                """Send a Unicode character using Win32 SendInput for universal app compatibility."""
+                try:
                     import ctypes
+                    from ctypes import wintypes
+
+                    KEYEVENTF_UNICODE = 0x0004
+                    KEYEVENTF_KEYUP = 0x0002
+                    INPUT_KEYBOARD = 1
+                    ULONG_PTR = ctypes.POINTER(wintypes.ULONG)
+
+                    class KEYBDINPUT(ctypes.Structure):
+                        _fields_ = [
+                            ("wVk", wintypes.WORD),
+                            ("wScan", wintypes.WORD),
+                            ("dwFlags", wintypes.DWORD),
+                            ("time", wintypes.DWORD),
+                            ("dwExtraInfo", ULONG_PTR),
+                        ]
+
+                    class _INPUTUNION(ctypes.Union):
+                        _fields_ = [("ki", KEYBDINPUT), ("padding", ctypes.c_byte * 32)]
+
+                    class INPUT(ctypes.Structure):
+                        _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
+
                     user32 = ctypes.windll.user32
-                    for char in text:
-                        user32.SendMessageW(target_w, 0x0102, ord(char), 0)
-                        if interval > 0:
-                            await asyncio.sleep(min(interval, 0.01))
-                    return {"success": True, "result": {}, "error": None}
+                    for code_unit in ch.encode("utf-16-le"):
+                        pass
+                    raw = ch.encode("utf-16-le")
+                    units = [int.from_bytes(raw[i:i + 2], "little") for i in range(0, len(raw), 2)]
+                    for unit in units:
+                        down = INPUT(type=INPUT_KEYBOARD)
+                        down.union.ki = KEYBDINPUT(wVk=0, wScan=unit, dwFlags=KEYEVENTF_UNICODE, time=0, dwExtraInfo=None)
+                        up = INPUT(type=INPUT_KEYBOARD)
+                        up.union.ki = KEYBDINPUT(wVk=0, wScan=unit, dwFlags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time=0, dwExtraInfo=None)
+                        arr = (INPUT * 2)(down, up)
+                        sent = user32.SendInput(2, ctypes.byref(arr), ctypes.sizeof(INPUT))
+                        if sent != 2:
+                            return False
+                    return True
+                except Exception:
+                    return False
+
+            if action == "type":
+                text = args.get("text", "")
+                interval = args.get("interval", 0.02)
 
                 for char in text:
-                    # Handle special characters
-                    if char.isupper():
-                        key_down(0x10)  # Shift
-                        await asyncio.sleep(0.01)
-                        vk = ord(char.lower())
-                        await press_key(vk)
-                        await asyncio.sleep(0.01)
-                        key_up(0x10)
-                    elif char in "!@#$%^&*()_+{}|:\"<>?":
-                        # Shift + key
-                        shift_map = {"!": "1", "@": "2", "#": "3", "$": "4", "%": "5",
-                                   "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
-                                   "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\",
-                                   ":": ";", "\"": "'", "<": ",", ">": ".", "?": "/"}
-                        if char in shift_map:
-                            key_down(0x10)
-                            await asyncio.sleep(0.01)
-                            vk = ord(shift_map[char])
-                            await press_key(vk)
-                            await asyncio.sleep(0.01)
-                            key_up(0x10)
-                        else:
-                            vk = ord(char)
-                            press_key(vk)
+                    if char == "\r":
+                        continue
+                    if char == "\n":
+                        await press_key(0x0D)
+                    elif char == "\t":
+                        await press_key(0x09)
+                    elif send_unicode_char(char):
+                        pass
                     else:
-                        vk = ord(char.upper())
-                        await press_key(vk)
-                    
-                    await asyncio.sleep(args.get("interval", 0.05))
-                
+                        vk_full = -1
+                        try:
+                            import ctypes
+                            vk_full = ctypes.windll.user32.VkKeyScanW(ord(char))
+                        except Exception:
+                            pass
+                        if vk_full != -1:
+                            vk = vk_full & 0xFF
+                            shift_state = (vk_full >> 8) & 0xFF
+                            if shift_state & 1:
+                                key_down(0x10)
+                            await press_key(vk)
+                            if shift_state & 1:
+                                key_up(0x10)
+                        else:
+                            vk = ord(char.upper())
+                            await press_key(vk)
+
+                    if interval > 0:
+                        await asyncio.sleep(min(interval, 0.05))
+
                 return {"success": True, "result": {}, "error": None}
             
             elif action == "press":
-                key = args.get("key", "").lower()
-                vk = self.VK_MAP.get(key)
+                key = args.get("key", "")
+                vk = resolve_vk(key)
                 if vk is None:
-                    try:
-                        vk = ord(key.upper())
-                    except:
-                        return {"success": False, "error": f"Unknown key: {key}", "error_code": "INVALID_INPUT"}
+                    return {"success": False, "error": f"Unknown key: {key}", "error_code": "INVALID_INPUT"}
                 
                 await press_key(vk)
                 return {"success": True, "result": {}, "error": None}
@@ -1175,15 +1253,11 @@ class KeyboardInputTool(BaseTool):
                 if not keys:
                     return {"success": False, "error": "keys array required for hotkey", "error_code": "INVALID_INPUT"}
                 
-                # Press modifiers first
                 vks = []
                 for k in keys:
-                    vk = self.VK_MAP.get(k.lower())
+                    vk = resolve_vk(k)
                     if vk is None:
-                        try:
-                            vk = ord(k.upper())
-                        except:
-                            return {"success": False, "error": f"Unknown key: {k}", "error_code": "INVALID_INPUT"}
+                        return {"success": False, "error": f"Unknown key: {k}", "error_code": "INVALID_INPUT"}
                     vks.append(vk)
                 
                 # Press all down
@@ -1199,24 +1273,18 @@ class KeyboardInputTool(BaseTool):
                 return {"success": True, "result": {}, "error": None}
             
             elif action == "hold":
-                key = args.get("key", "").lower()
-                vk = self.VK_MAP.get(key)
+                key = args.get("key", "")
+                vk = resolve_vk(key)
                 if vk is None:
-                    try:
-                        vk = ord(key.upper())
-                    except:
-                        return {"success": False, "error": f"Unknown key: {key}", "error_code": "INVALID_INPUT"}
+                    return {"success": False, "error": f"Unknown key: {key}", "error_code": "INVALID_INPUT"}
                 key_down(vk)
                 return {"success": True, "result": {}, "error": None}
             
             elif action == "release":
-                key = args.get("key", "").lower()
-                vk = self.VK_MAP.get(key)
+                key = args.get("key", "")
+                vk = resolve_vk(key)
                 if vk is None:
-                    try:
-                        vk = ord(key.upper())
-                    except:
-                        return {"success": False, "error": f"Unknown key: {key}", "error_code": "INVALID_INPUT"}
+                    return {"success": False, "error": f"Unknown key: {key}", "error_code": "INVALID_INPUT"}
                 key_up(vk)
                 return {"success": True, "result": {}, "error": None}
             
@@ -1455,18 +1523,22 @@ class WindowInteractTool(BaseTool):
             elif action == "type":
                 if not text:
                     return {"success": False, "error": "text required for type action", "error_code": "INVALID_INPUT"}
-                # Handle different control types
                 ctrl_type = control.element_info.control_type
                 ctrl_class = control.element_info.class_name
                 if ctrl_type == "Document" and ctrl_class == "RichEditD2DPT":
-                    # Modern Notepad uses RichEditD2DPT with UIA Value pattern
                     try:
                         control.iface_value.SetValue(text)
-                    except Exception as e:
-                        return {"success": False, "error": f"Failed to set text via UIA Value: {e}", "error_code": "TYPE_FAILED"}
+                    except Exception:
+                        control.click_input()
+                        await asyncio.sleep(0.05)
+                        control.type_keys(text, with_spaces=True, with_newlines=True)
                 else:
-                    # Standard edit control
-                    control.set_edit_text(text)
+                    try:
+                        control.set_edit_text(text)
+                    except Exception:
+                        control.click_input()
+                        await asyncio.sleep(0.05)
+                        control.type_keys(text, with_spaces=True, with_newlines=True)
                 await asyncio.sleep(0.1)
                 return {"success": True, "result": {}, "error": None}
             

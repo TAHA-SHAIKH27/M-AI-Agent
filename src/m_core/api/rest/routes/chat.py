@@ -17,6 +17,7 @@ from ..schemas import (
     TaskInfo, TaskStatus, TaskCancelRequest, TaskApproveRequest,
     ErrorResponse,
 )
+from ..serializers import execution_record_to_task_info
 from ..dependencies import (
     get_client_info, validate_localhost, get_orchestrator,
     get_current_agent, get_conversation_id, APIClientInfo,
@@ -329,48 +330,7 @@ async def create_task(
         )
         
         # Convert to API response
-        subtasks = []
-        for sr in execution_record.subtask_records:
-            subtasks.append({
-                "subtask_id": sr.subtask_id,
-                "status": sr.status.value,
-                "assigned_target_type": sr.assigned_target_type,
-                "assigned_target_id": sr.assigned_target_id,
-                "started_at": sr.started_at,
-                "completed_at": sr.completed_at,
-                "result": sr.result,
-                "error": sr.error,
-                "retry_count": sr.retry_count,
-                "dependencies": sr.dependencies,
-                "execution_time_ms": sr.execution_time_ms,
-            })
-        
-        # Map status
-        status_map = {
-            TaskExecutionStatus.PENDING: TaskStatus.PENDING,
-            TaskExecutionStatus.QUEUED: TaskStatus.QUEUED,
-            TaskExecutionStatus.RUNNING: TaskStatus.RUNNING,
-            TaskExecutionStatus.WAITING: TaskStatus.WAITING,
-            TaskExecutionStatus.COMPLETED: TaskStatus.COMPLETED,
-            TaskExecutionStatus.FAILED: TaskStatus.FAILED,
-            TaskExecutionStatus.CANCELLED: TaskStatus.CANCELLED,
-            TaskExecutionStatus.REPLANNING: TaskStatus.REPLANNING,
-            TaskExecutionStatus.AWAITING_APPROVAL: TaskStatus.AWAITING_APPROVAL,
-        }
-        
-        return TaskInfo(
-            task_id=execution_record.task_id,
-            status=status_map.get(execution_record.status, TaskStatus.PENDING),
-            conversation_id=execution_record.conversation_id,
-            created_at=execution_record.created_at,
-            started_at=execution_record.started_at,
-            completed_at=execution_record.completed_at,
-            error=execution_record.error,
-            error_code=execution_record.error_code,
-            subtasks=subtasks,
-            result=execution_record.result,
-            metadata=execution_record.metadata,
-        )
+        return execution_record_to_task_info(execution_record)
         
     except Exception as e:
         logger.error("task_create_failed", error=str(e), exc_info=True)
@@ -409,47 +369,7 @@ async def get_task_status(
             )
         
         # Convert subtasks
-        subtasks = []
-        for sr in execution_record.subtask_records:
-            subtasks.append({
-                "subtask_id": sr.subtask_id,
-                "status": sr.status.value,
-                "assigned_target_type": sr.assigned_target_type,
-                "assigned_target_id": sr.assigned_target_id,
-                "started_at": sr.started_at,
-                "completed_at": sr.completed_at,
-                "result": sr.result,
-                "error": sr.error,
-                "retry_count": sr.retry_count,
-                "dependencies": sr.dependencies,
-                "execution_time_ms": sr.execution_time_ms,
-            })
-        
-        status_map = {
-            TaskExecutionStatus.PENDING: TaskStatus.PENDING,
-            TaskExecutionStatus.QUEUED: TaskStatus.QUEUED,
-            TaskExecutionStatus.RUNNING: TaskStatus.RUNNING,
-            TaskExecutionStatus.WAITING: TaskStatus.WAITING,
-            TaskExecutionStatus.COMPLETED: TaskStatus.COMPLETED,
-            TaskExecutionStatus.FAILED: TaskStatus.FAILED,
-            TaskExecutionStatus.CANCELLED: TaskStatus.CANCELLED,
-            TaskExecutionStatus.REPLANNING: TaskStatus.REPLANNING,
-            TaskExecutionStatus.AWAITING_APPROVAL: TaskStatus.AWAITING_APPROVAL,
-        }
-        
-        return TaskInfo(
-            task_id=execution_record.task_id,
-            status=status_map.get(execution_record.status, TaskStatus.PENDING),
-            conversation_id=execution_record.conversation_id,
-            created_at=execution_record.created_at,
-            started_at=execution_record.started_at,
-            completed_at=execution_record.completed_at,
-            error=execution_record.error,
-            error_code=execution_record.error_code,
-            subtasks=subtasks,
-            result=execution_record.result,
-            metadata=execution_record.metadata,
-        )
+        return execution_record_to_task_info(execution_record)
         
     except HTTPException:
         raise
@@ -502,47 +422,7 @@ async def cancel_task(
                 },
             )
         
-        subtasks = []
-        for sr in execution_record.subtask_records:
-            subtasks.append({
-                "subtask_id": sr.subtask_id,
-                "status": sr.status.value,
-                "assigned_target_type": sr.assigned_target_type,
-                "assigned_target_id": sr.assigned_target_id,
-                "started_at": sr.started_at,
-                "completed_at": sr.completed_at,
-                "result": sr.result,
-                "error": sr.error,
-                "retry_count": sr.retry_count,
-                "dependencies": sr.dependencies,
-                "execution_time_ms": sr.execution_time_ms,
-            })
-        
-        status_map = {
-            TaskExecutionStatus.PENDING: TaskStatus.PENDING,
-            TaskExecutionStatus.QUEUED: TaskStatus.QUEUED,
-            TaskExecutionStatus.RUNNING: TaskStatus.RUNNING,
-            TaskExecutionStatus.WAITING: TaskStatus.WAITING,
-            TaskExecutionStatus.COMPLETED: TaskStatus.COMPLETED,
-            TaskExecutionStatus.FAILED: TaskStatus.FAILED,
-            TaskExecutionStatus.CANCELLED: TaskStatus.CANCELLED,
-            TaskExecutionStatus.REPLANNING: TaskStatus.REPLANNING,
-            TaskExecutionStatus.AWAITING_APPROVAL: TaskStatus.AWAITING_APPROVAL,
-        }
-        
-        return TaskInfo(
-            task_id=execution_record.task_id,
-            status=status_map.get(execution_record.status, TaskStatus.CANCELLED),
-            conversation_id=execution_record.conversation_id,
-            created_at=execution_record.created_at,
-            started_at=execution_record.started_at,
-            completed_at=execution_record.completed_at,
-            error=execution_record.error,
-            error_code=execution_record.error_code,
-            subtasks=subtasks,
-            result=execution_record.result,
-            metadata=execution_record.metadata,
-        )
+        return execution_record_to_task_info(execution_record, default_status=TaskStatus.CANCELLED)
         
     except HTTPException:
         raise
@@ -598,46 +478,9 @@ async def approve_task(
                 },
             )
         
-        subtasks = []
-        for sr in execution_record.subtask_records:
-            subtasks.append({
-                "subtask_id": sr.subtask_id,
-                "status": sr.status.value,
-                "assigned_target_type": sr.assigned_target_type,
-                "assigned_target_id": sr.assigned_target_id,
-                "started_at": sr.started_at,
-                "completed_at": sr.completed_at,
-                "result": sr.result,
-                "error": sr.error,
-                "retry_count": sr.retry_count,
-                "dependencies": sr.dependencies,
-                "execution_time_ms": sr.execution_time_ms,
-            })
-        
-        status_map = {
-            TaskExecutionStatus.PENDING: TaskStatus.PENDING,
-            TaskExecutionStatus.QUEUED: TaskStatus.QUEUED,
-            TaskExecutionStatus.RUNNING: TaskStatus.RUNNING,
-            TaskExecutionStatus.WAITING: TaskStatus.WAITING,
-            TaskExecutionStatus.COMPLETED: TaskStatus.COMPLETED,
-            TaskExecutionStatus.FAILED: TaskStatus.FAILED,
-            TaskExecutionStatus.CANCELLED: TaskStatus.CANCELLED,
-            TaskExecutionStatus.REPLANNING: TaskStatus.REPLANNING,
-            TaskExecutionStatus.AWAITING_APPROVAL: TaskStatus.AWAITING_APPROVAL,
-        }
-        
-        return TaskInfo(
-            task_id=execution_record.task_id,
-            status=status_map.get(execution_record.status, TaskStatus.RUNNING if request.approved else TaskStatus.FAILED),
-            conversation_id=execution_record.conversation_id,
-            created_at=execution_record.created_at,
-            started_at=execution_record.started_at,
-            completed_at=execution_record.completed_at,
-            error=execution_record.error,
-            error_code=execution_record.error_code,
-            subtasks=subtasks,
-            result=execution_record.result,
-            metadata=execution_record.metadata,
+        return execution_record_to_task_info(
+            execution_record,
+            default_status=TaskStatus.RUNNING if request.approved else TaskStatus.FAILED,
         )
     except HTTPException:
         raise
